@@ -87,6 +87,10 @@ tmp/
 temp/
 *.tmp
 
+/mcp.json
+/ssh-key-2026-09-08.key
+/ssh-key-2026-09-08.key.pub
+
 # ==============================
 # Build / distribution
 # ==============================
