@@ -1,82 +1,83 @@
-"""Data models for the MCP video-generation interface.
-
-These models define the contract between the LLM and the server. They are
-deliberately independent of any particular video-generation backend, so the
-same shapes hold whether the work is done by a mock, a local GPU model, or a
-remote API.
-"""
-
+from datetime import datetime, timezone
 from enum import StrEnum
-from typing import Literal
+from typing import Annotated, Literal
+from uuid import UUID
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field, StringConstraints, field_validator
 
-# The aspect ratios the interface accepts. Declared as a Literal so the value
-# set is visible in the tool schema the LLM reads.
-AspectRatio = Literal["16:9", "9:16", "1:1", "4:3", "21:9"]
 
-MIN_DURATION_SECONDS = 1
-MAX_DURATION_SECONDS = 60
+Prompt = Annotated[
+    str,
+    StringConstraints(
+        strip_whitespace=True,
+        min_length=1,
+        max_length=2000,
+    ),
+]
+FiveSeconds = Annotated[int, Field(strict=True, ge=5, le=5)]
+
+
+class Contract(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+
+class ImageAsset(Contract):
+    asset_id: UUID
+    mime_type: Literal["image/jpeg"] = "image/jpeg"
+    width: Literal[1280] = 1280
+    height: Literal[720] = 720
+    size_bytes: int = Field(gt=0)
+    sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
+
+
+class GenerationPlan(Contract):
+    asset_id: UUID
+    prompt: Prompt
+    model: Literal["ltx-2-5-fast"] = "ltx-2-5-fast"
+    duration: FiveSeconds = 5
+    aspect_ratio: Literal["16:9"] = "16:9"
+    audio: Literal["silent"] = "silent"
+
+    @field_validator("duration", mode="before")
+    @classmethod
+    def validate_duration_type(cls, value: object) -> int:
+        if type(value) is not int or value != 5:
+            raise ValueError("duration must be the integer 5.")
+        return value
+
+
+class VideoEstimate(Contract):
+    currency: Literal["USD"] = "USD"
+    estimated_cost: float = 0.54
+    generated_seconds: Literal[6] = 6
+    delivered_seconds: Literal[5] = 5
+    basis: str = "LTX direct API, 720p; excludes taxes."
 
 
 class JobStatus(StrEnum):
-    """Lifecycle of a video-generation job."""
-
     QUEUED = "queued"
     RUNNING = "running"
     COMPLETED = "completed"
-    CANCELLED = "cancelled"
     FAILED = "failed"
-
-    @property
-    def is_terminal(self) -> bool:
-        """Whether no further status change is possible."""
-        return self in (JobStatus.COMPLETED, JobStatus.CANCELLED, JobStatus.FAILED)
+    UNKNOWN = "unknown"
 
 
-class VideoRequest(BaseModel):
-    """A validated request to generate a video."""
-
-    prompt: str = Field(
-        min_length=1,
-        max_length=2000,
-        description="Description of the video to generate.",
-    )
-    duration: int = Field(
-        default=5,
-        ge=MIN_DURATION_SECONDS,
-        le=MAX_DURATION_SECONDS,
-        description="Length of the video in seconds.",
-    )
-    aspect_ratio: AspectRatio = Field(
-        default="16:9",
-        description="Aspect ratio of the generated video.",
+class VideoJob(Contract):
+    job_id: UUID
+    plan: GenerationPlan
+    status: JobStatus
+    comfy_id: str | None = None
+    progress: int | None = Field(default=None, ge=0, le=100)
+    message: str = ""
+    created_at: datetime = Field(
+        default_factory=lambda: datetime.now(timezone.utc)
     )
 
 
-class VideoJob(BaseModel):
-    """The current state of a video-generation job."""
-
-    job_id: str = Field(description="Identifier used to track this job.")
-    status: JobStatus = Field(description="Current lifecycle state of the job.")
-    progress: int = Field(
-        ge=0,
-        le=100,
-        description="Completion percentage, 0-100.",
-    )
-    prompt: str = Field(description="Prompt the job was created from.")
-    duration: int = Field(description="Requested video length in seconds.")
-    aspect_ratio: str = Field(description="Requested aspect ratio.")
-    message: str = Field(description="Human-readable summary of the job state.")
-
-
-class VideoResult(BaseModel):
-    """The output of a completed video-generation job."""
-
-    job_id: str = Field(description="Identifier of the completed job.")
-    status: JobStatus = Field(description="Always 'completed' for a result.")
-    video_path: str = Field(description="Path to the generated video file.")
-    prompt: str = Field(description="Prompt the video was generated from.")
-    duration: int = Field(description="Video length in seconds.")
-    aspect_ratio: str = Field(description="Aspect ratio of the video.")
-    message: str = Field(description="Human-readable summary of the result.")
+class VideoResult(Contract):
+    job_id: UUID
+    status: Literal["completed"] = "completed"
+    duration: FiveSeconds = 5
+    aspect_ratio: Literal["16:9"] = "16:9"
+    video_path: str
+    video_url: str | None = None
