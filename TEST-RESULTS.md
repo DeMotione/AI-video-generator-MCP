@@ -55,10 +55,6 @@ The pipeline works end to end: MCP tool call → ComfyUI → `AVG_LTX25` → LTX
 strict and fails with useful messages, and the per-job journal makes retries
 idempotent so polling can't double-bill.
 
-Not yet exercised: the Oracle VM (`llm-gemma3-12b`) as an MCP client. Transport
-is proven — the tailnet endpoint completes a full handshake — but `agent.py`
-has never run against it.
-
 ## Known issues
 
 1. **`photo.png` can never register.** It is 1672×941; `video.py` requires
