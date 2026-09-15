@@ -1,230 +1,344 @@
-"""Video-generation backend.
-
-Phase 1 ships a mock backend only. It performs no real generation, but it does
-keep genuine job state and advance it over time, so that an LLM driving the MCP
-tools has to complete the full workflow: create a job, poll it while it is still
-running, retrieve the result once it is ready, and recover from errors such as
-an unknown job id.
-
-The backend is accessed through the `VideoBackend` protocol so a real
-implementation (local model, ComfyUI, remote API) can replace the mock without
-touching the MCP tool layer.
-"""
-
-from __future__ import annotations
-
+import hashlib
+import io
 import os
-import time
-import uuid
-from collections.abc import Callable
-from dataclasses import dataclass, field
-from typing import Protocol
+from pathlib import Path
+from uuid import UUID, uuid4
 
-from video_mcp.models import JobStatus, VideoJob, VideoRequest, VideoResult
+import httpx
+from PIL import Image, ImageOps
 
-# Default mock timings. Kept short enough that an interactive LLM session does
-# not stall, but long enough that the model must actually poll for status
-# instead of getting a completed job on the first call.
-DEFAULT_QUEUED_SECONDS = 2.0
-DEFAULT_RUNNING_SECONDS = 8.0
+from video_mcp.models import (
+    GenerationPlan,
+    ImageAsset,
+    JobStatus,
+    VideoEstimate,
+    VideoJob,
+    VideoResult,
+)
 
-OUTPUT_DIR = "outputs"
+
+PRESET = "ltx25-fast-5s-16x9-v1"
+MAX_IMAGE_BYTES = 10 * 1024 * 1024
 
 
 class VideoServiceError(Exception):
-    """Base class for errors the MCP layer turns into tool errors."""
+    pass
 
 
-class JobNotFoundError(VideoServiceError):
-    def __init__(self, job_id: str) -> None:
-        super().__init__(
-            f"No video job exists with id {job_id!r}. "
-            f"Call create_video first and use the job_id it returns."
+class ComfyBackend:
+    def __init__(self, root: Path | None = None):
+        self.root = root or Path(__file__).resolve().parents[1] / "data"
+        self.comfy_url = os.getenv(
+            "COMFY_URL", "http://127.0.0.1:8188"
+        ).rstrip("/")
+        self.public_url = os.getenv("PUBLIC_BASE_URL", "").rstrip("/")
+
+        for folder in ("incoming", "assets", "jobs", "outputs"):
+            (self.root / folder).mkdir(parents=True, exist_ok=True)
+
+    def _write(self, path: Path, content: bytes):
+        temporary = path.with_name(f"{path.name}.{uuid4().hex}.tmp")
+        temporary.write_bytes(content)
+        temporary.replace(path)
+
+    def _save(self, folder, identifier, model):
+        self._write(
+            self.root / folder / f"{identifier}.json",
+            model.model_dump_json(indent=2).encode(),
         )
-        self.job_id = job_id
 
+    def _load(self, folder, identifier, model):
+        identifier = UUID(str(identifier))
+        path = self.root / folder / f"{identifier}.json"
+        if not path.is_file():
+            raise VideoServiceError(f"Unknown {folder} ID: {identifier}")
+        return model.model_validate_json(path.read_text())
 
-class JobNotReadyError(VideoServiceError):
-    def __init__(self, job_id: str, status: JobStatus) -> None:
-        super().__init__(
-            f"Job {job_id!r} is {status.value}, not completed. "
-            f"Call get_video_status until the status is 'completed', "
-            f"then request the result again."
-        )
-        self.job_id = job_id
-        self.status = status
-
-
-class JobNotCancellableError(VideoServiceError):
-    def __init__(self, job_id: str, status: JobStatus) -> None:
-        super().__init__(
-            f"Job {job_id!r} cannot be cancelled because it is already {status.value}."
-        )
-        self.job_id = job_id
-        self.status = status
-
-
-@dataclass
-class _JobRecord:
-    """Internal bookkeeping for a single mock job."""
-
-    job_id: str
-    request: VideoRequest
-    created_at: float
-    cancelled: bool = field(default=False)
-
-
-class VideoBackend(Protocol):
-    """The operations the MCP tool layer depends on."""
-
-    def create(self, request: VideoRequest) -> VideoJob: ...
-
-    def status(self, job_id: str) -> VideoJob: ...
-
-    def result(self, job_id: str) -> VideoResult: ...
-
-    def cancel(self, job_id: str) -> VideoJob: ...
-
-
-class MockVideoBackend:
-    """In-memory backend that simulates a video-generation queue.
-
-    Job state is derived from elapsed time rather than stored, so progress
-    advances on its own between polls without any background task.
-    """
-
-    def __init__(
-        self,
-        clock: Callable[[], float] = time.monotonic,
-        queued_seconds: float = DEFAULT_QUEUED_SECONDS,
-        running_seconds: float = DEFAULT_RUNNING_SECONDS,
-    ) -> None:
-        self._clock = clock
-        self._queued_seconds = queued_seconds
-        self._running_seconds = running_seconds
-        self._jobs: dict[str, _JobRecord] = {}
-
-    # -- queries ---------------------------------------------------------
-
-    def _get(self, job_id: str) -> _JobRecord:
+    def _request(self, method, path, **kwargs):
         try:
-            return self._jobs[job_id]
-        except KeyError:
-            raise JobNotFoundError(job_id) from None
+            response = httpx.request(
+                method,
+                f"{self.comfy_url}{path}",
+                timeout=30,
+                **kwargs,
+            )
+            response.raise_for_status()
+            return response
+        except httpx.HTTPStatusError as exc:
+            raise VideoServiceError(
+                f"ComfyUI returned HTTP {exc.response.status_code}."
+            ) from exc
+        except httpx.RequestError as exc:
+            raise VideoServiceError(
+                "Cannot reach ComfyUI. Check COMFY_URL and the desktop app."
+            ) from exc
 
-    def _evaluate(self, record: _JobRecord) -> tuple[JobStatus, int]:
-        """Return the job's current status and progress percentage."""
-        if record.cancelled:
-            return JobStatus.CANCELLED, 0
+    def register_image(self, filename: str) -> ImageAsset:
+        incoming = (self.root / "incoming").resolve()
+        path = (incoming / filename).resolve()
 
-        elapsed = self._clock() - record.created_at
-        if elapsed < self._queued_seconds:
-            return JobStatus.QUEUED, 0
+        if (
+            not filename
+            or "/" in filename
+            or "\\" in filename
+            or not path.is_relative_to(incoming)
+            or not path.is_file()
+        ):
+            raise VideoServiceError(
+                "Use a filename from data/incoming, such as photo.jpg."
+            )
 
-        if self._running_seconds <= 0:
-            return JobStatus.COMPLETED, 100
+        with path.open("rb") as source:
+            raw = source.read(MAX_IMAGE_BYTES + 1)
 
-        running_elapsed = elapsed - self._queued_seconds
-        if running_elapsed >= self._running_seconds:
-            return JobStatus.COMPLETED, 100
+        if len(raw) > MAX_IMAGE_BYTES:
+            raise VideoServiceError("Image exceeds 10 MiB.")
 
-        # Report 1-99 while running, so progress is never mistaken for either
-        # "not started" or "done".
-        fraction = running_elapsed / self._running_seconds
-        return JobStatus.RUNNING, max(1, min(99, int(fraction * 100)))
+        try:
+            with Image.open(io.BytesIO(raw)) as source:
+                if source.format not in {"JPEG", "PNG", "WEBP"}:
+                    raise ValueError("Use JPEG, PNG or WebP.")
+                if getattr(source, "n_frames", 1) != 1:
+                    raise ValueError("Animated images are unsupported.")
+                if max(source.size) > 4096:
+                    raise ValueError("Maximum image dimension is 4096 pixels.")
 
-    def _to_job(self, record: _JobRecord) -> VideoJob:
-        status, progress = self._evaluate(record)
-        return VideoJob(
-            job_id=record.job_id,
-            status=status,
-            progress=progress,
-            prompt=record.request.prompt,
-            duration=record.request.duration,
-            aspect_ratio=record.request.aspect_ratio,
-            message=_describe(status, progress),
+                frame = ImageOps.exif_transpose(source)
+                width, height = frame.size
+
+                if width < 320 or height < 180:
+                    raise ValueError("Minimum image size is 320×180.")
+                if width * 9 != height * 16:
+                    raise ValueError("This preset requires a 16:9 image.")
+
+                rgba = frame.convert("RGBA")
+                rgb = Image.new("RGB", rgba.size, "white")
+                rgb.paste(rgba, mask=rgba.getchannel("A"))
+
+                normalized = io.BytesIO()
+                rgb.resize(
+                    (1280, 720), Image.Resampling.LANCZOS
+                ).save(normalized, format="JPEG", quality=90)
+        except (OSError, ValueError, Image.DecompressionBombError) as exc:
+            raise VideoServiceError(f"Invalid image: {exc}") from exc
+
+        content = normalized.getvalue()
+        asset = ImageAsset(
+            asset_id=uuid4(),
+            size_bytes=len(content),
+            sha256=hashlib.sha256(content).hexdigest(),
+        )
+        self._write(
+            self.root / "assets" / f"{asset.asset_id}.jpg", content
+        )
+        self._save("assets", asset.asset_id, asset)
+        return asset
+
+    def validate_plan(self, plan):
+        if isinstance(plan, GenerationPlan):
+            plan = plan.model_dump()
+        plan = GenerationPlan.model_validate(plan)
+
+        asset = self._load("assets", plan.asset_id, ImageAsset)
+        content = (
+            self.root / "assets" / f"{asset.asset_id}.jpg"
+        ).read_bytes()
+
+        if (
+            len(content) != asset.size_bytes
+            or hashlib.sha256(content).hexdigest() != asset.sha256
+        ):
+            raise VideoServiceError("Image changed. Register it again.")
+
+        return plan, asset, content
+
+    def estimate(self, plan: GenerationPlan) -> VideoEstimate:
+        self.validate_plan(plan)
+        return VideoEstimate()
+
+    def create(self, plan: GenerationPlan) -> VideoJob:
+        plan, asset, content = self.validate_plan(plan)
+
+        health = self._request("GET", "/avg/health").json()
+        if not health.get("ready") or health.get("preset") != PRESET:
+            raise VideoServiceError(
+                f"ComfyUI node is not ready: {health.get('missing', [])}"
+            )
+
+        uploaded = self._request(
+            "POST",
+            "/upload/image",
+            files={
+                "image": (
+                    f"{asset.asset_id}.jpg",
+                    content,
+                    "image/jpeg",
+                )
+            },
+            data={"overwrite": "false"},
+        ).json()
+
+        image_name = "/".join(
+            part for part in (
+                uploaded.get("subfolder", ""),
+                uploaded["name"],
+            ) if part
         )
 
-    # -- backend operations ----------------------------------------------
-
-    def create(self, request: VideoRequest) -> VideoJob:
-        record = _JobRecord(
-            job_id=str(uuid.uuid4()),
-            request=request,
-            created_at=self._clock(),
+        job = VideoJob(
+            job_id=uuid4(),
+            plan=plan,
+            status=JobStatus.UNKNOWN,
+            message="Submission outcome is not yet recorded.",
         )
-        self._jobs[record.job_id] = record
-        return self._to_job(record)
+        self._save("jobs", job.job_id, job)
 
-    def status(self, job_id: str) -> VideoJob:
-        return self._to_job(self._get(job_id))
+        workflow = {
+            "1": {
+                "class_type": "LoadImage",
+                "inputs": {"image": image_name},
+            },
+            "2": {
+                "class_type": "AVG_LTX25",
+                "inputs": {
+                    "image": ["1", 0],
+                    "prompt": plan.prompt,
+                    "request_id": str(job.job_id),
+                },
+            },
+        }
 
-    def result(self, job_id: str) -> VideoResult:
-        record = self._get(job_id)
-        status, _ = self._evaluate(record)
-        if status is not JobStatus.COMPLETED:
-            raise JobNotReadyError(job_id, status)
+        try:
+            submitted = self._request(
+                "POST",
+                "/prompt",
+                json={
+                    "prompt": workflow,
+                    "client_id": str(job.job_id),
+                },
+            ).json()
+            if submitted.get("node_errors"):
+                raise VideoServiceError("ComfyUI rejected the workflow.")
+
+            job = job.model_copy(update={
+                "comfy_id": submitted["prompt_id"],
+                "status": JobStatus.QUEUED,
+                "progress": 0,
+                "message": "Queued in ComfyUI.",
+            })
+        except (VideoServiceError, ValueError, KeyError):
+            job = job.model_copy(update={
+                "message": (
+                    "Submission outcome is unknown. Inspect the ComfyUI "
+                    "queue/history before creating another job."
+                )
+            })
+
+        self._save("jobs", job.job_id, job)
+        return job
+
+    def status(self, job_id: UUID) -> VideoJob:
+        job = self._load("jobs", job_id, VideoJob)
+        if job.status in {
+            JobStatus.COMPLETED,
+            JobStatus.FAILED,
+            JobStatus.UNKNOWN,
+        }:
+            return job
+
+        queue = self._request("GET", "/queue").json()
+        history = self._request(
+            "GET", f"/history/{job.comfy_id}"
+        ).json().get(job.comfy_id)
+
+        if history:
+            state = history.get("status", {})
+
+            if state.get("status_str") == "error":
+                job = job.model_copy(update={
+                    "status": JobStatus.FAILED,
+                    "progress": None,
+                    "message": (
+                        "Workflow failed. Generation may already be billed; "
+                        "inspect ComfyUI before retrying."
+                    ),
+                })
+            elif state.get("completed"):
+                outputs = history.get("outputs", {}).get("2", {})
+                videos = outputs.get("avg_video", [])
+                expected = f"{job.job_id}.mp4"
+
+                if (
+                    len(videos) != 1
+                    or videos[0].get("filename") != expected
+                    or videos[0].get("subfolder") != "avg"
+                ):
+                    raise VideoServiceError(
+                        "Completed workflow has no expected video output."
+                    )
+
+                response = self._request(
+                    "GET",
+                    "/view",
+                    params={
+                        "filename": expected,
+                        "subfolder": "avg",
+                        "type": "output",
+                    },
+                )
+                self._write(
+                    self.root / "outputs" / expected, response.content
+                )
+                job = job.model_copy(update={
+                    "status": JobStatus.COMPLETED,
+                    "progress": 100,
+                    "message": "Five-second video is ready.",
+                })
+        elif any(
+            entry[1] == job.comfy_id
+            for entry in queue.get("queue_running", [])
+        ):
+            job = job.model_copy(update={
+                "status": JobStatus.RUNNING,
+                "progress": None,
+                "message": "Generating or finishing the video.",
+            })
+        elif any(
+            entry[1] == job.comfy_id
+            for entry in queue.get("queue_pending", [])
+        ):
+            job = job.model_copy(update={
+                "status": JobStatus.QUEUED,
+                "progress": 0,
+                "message": "Waiting in the ComfyUI queue.",
+            })
+        else:
+            job = job.model_copy(update={
+                "status": JobStatus.UNKNOWN,
+                "progress": None,
+                "message": (
+                    "Job is missing from ComfyUI queue/history. "
+                    "Inspect ComfyUI before resubmitting."
+                ),
+            })
+
+        self._save("jobs", job.job_id, job)
+        return job
+
+    def result(self, job_id: UUID) -> VideoResult:
+        job = self.status(job_id)
+        if job.status != JobStatus.COMPLETED:
+            raise VideoServiceError(f"Job is {job.status.value}.")
+
+        path = self.root / "outputs" / f"{job.job_id}.mp4"
+        if not path.is_file():
+            raise VideoServiceError("The saved video is missing.")
 
         return VideoResult(
-            job_id=record.job_id,
-            status=status,
-            video_path=f"{OUTPUT_DIR}/{record.job_id}.mp4",
-            prompt=record.request.prompt,
-            duration=record.request.duration,
-            aspect_ratio=record.request.aspect_ratio,
-            message=(
-                "Mock video generation completed. No file was written; this is "
-                "a placeholder path for the Phase 1 proof of concept."
+            job_id=job.job_id,
+            video_path=str(path.resolve()),
+            video_url=(
+                f"{self.public_url}/videos/{job.job_id}.mp4"
+                if self.public_url else None
             ),
         )
-
-    def cancel(self, job_id: str) -> VideoJob:
-        record = self._get(job_id)
-        status, _ = self._evaluate(record)
-        if status.is_terminal:
-            raise JobNotCancellableError(job_id, status)
-
-        record.cancelled = True
-        return self._to_job(record)
-
-
-def _describe(status: JobStatus, progress: int) -> str:
-    match status:
-        case JobStatus.QUEUED:
-            return "Job is queued and has not started yet."
-        case JobStatus.RUNNING:
-            return f"Job is generating the video ({progress}% complete)."
-        case JobStatus.COMPLETED:
-            return "Job is complete. Call get_video_result to retrieve the video."
-        case JobStatus.CANCELLED:
-            return "Job was cancelled."
-        case _:
-            return "Job failed."
-
-
-def _float_env(name: str, default: float) -> float:
-    """Read a non-negative float from the environment, falling back on error."""
-    raw = os.environ.get(name)
-    if raw is None:
-        return default
-    try:
-        value = float(raw)
-    except ValueError:
-        return default
-    return value if value >= 0 else default
-
-
-def build_backend() -> VideoBackend:
-    """Create the backend the server uses.
-
-    Mock timings can be shortened or lengthened for LLM evaluation runs via
-    AI_VIDEO_MOCK_QUEUED_SECONDS and AI_VIDEO_MOCK_RUNNING_SECONDS.
-    """
-    return MockVideoBackend(
-        queued_seconds=_float_env(
-            "AI_VIDEO_MOCK_QUEUED_SECONDS", DEFAULT_QUEUED_SECONDS
-        ),
-        running_seconds=_float_env(
-            "AI_VIDEO_MOCK_RUNNING_SECONDS", DEFAULT_RUNNING_SECONDS
-        ),
-    )

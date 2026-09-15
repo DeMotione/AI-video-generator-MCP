@@ -1,184 +1,213 @@
-"""Tests for the MCP tool layer, exercised through an in-memory MCP client.
-
-These cover what the LLM actually sees: the registered tool set, the structured
-results, and the error messages returned when a call cannot be satisfied.
-"""
-
 import asyncio
+from uuid import uuid4
 
+import httpx
 import pytest
-from fastmcp import Client
 from fastmcp.exceptions import ToolError
-
-from tests.conftest import QUEUED_SECONDS, RUNNING_SECONDS, FakeClock
-from video_mcp import server
-from video_mcp.models import JobStatus
-from video_mcp.video import MockVideoBackend
-
-EXPECTED_TOOLS = {
-    "create_video",
-    "get_video_status",
-    "get_video_result",
-    "cancel_video",
-}
+from PIL import Image
 
 
-@pytest.fixture(autouse=True)
-def backend(monkeypatch, clock: FakeClock) -> MockVideoBackend:
-    """Give every test its own backend on a clock it controls."""
-    stub = MockVideoBackend(
-        clock=clock,
-        queued_seconds=QUEUED_SECONDS,
-        running_seconds=RUNNING_SECONDS,
-    )
-    monkeypatch.setattr(server, "backend", stub)
-    return stub
+def test_server_exposes_current_tools(list_tools, expected_tools):
+    assert {tool.name for tool in list_tools()} == expected_tools
 
 
-def call(tool: str, **arguments):
-    """Call one tool through an in-memory MCP client and return its data."""
-
-    async def _call():
-        async with Client(server.mcp) as client:
-            result = await client.call_tool(tool, arguments)
-            return result.data
-
-    return asyncio.run(_call())
-
-
-def list_tools():
-    async def _list():
-        async with Client(server.mcp) as client:
-            return await client.list_tools()
-
-    return asyncio.run(_list())
-
-
-# -- tool registration ---------------------------------------------------
-
-
-def test_server_exposes_the_phase_1_tools():
-    assert {tool.name for tool in list_tools()} == EXPECTED_TOOLS
-
-
-def test_every_tool_is_described_for_the_llm():
+def test_every_tool_has_a_description(list_tools):
     for tool in list_tools():
-        assert tool.description, f"{tool.name} has no description"
+        assert tool.description
 
 
-def test_create_video_schema_advertises_the_valid_aspect_ratios():
-    schema = next(t for t in list_tools() if t.name == "create_video").input_schema
+def test_create_schema_advertises_foundation_contract(list_tools):
+    tool = next(tool for tool in list_tools() if tool.name == "create_video")
+    schema = getattr(tool, "input_schema", None)
+    if schema is None:
+        schema = tool.input_schema
 
-    assert set(schema["required"]) == {"prompt"}
-    assert schema["properties"]["duration"]["default"] == 5
-    assert schema["properties"]["aspect_ratio"]["default"] == "16:9"
+    assert set(schema["required"]) == {"plan"}
 
+    plan_schema = schema["properties"]["plan"]
+    while "$ref" in plan_schema:
+        reference = plan_schema["$ref"]
+        assert reference.startswith("#/")
+        plan_schema = schema
+        for part in reference[2:].split("/"):
+            plan_schema = plan_schema[part]
 
-# -- happy path ----------------------------------------------------------
+    assert set(plan_schema["required"]) == {"asset_id", "prompt"}
+    assert plan_schema["additionalProperties"] is False
 
+    duration = plan_schema["properties"]["duration"]
+    assert duration["type"] == "integer"
+    assert duration["minimum"] == 5
+    assert duration["maximum"] == 5
+    assert duration["default"] == 5
 
-def test_create_video_returns_a_queued_job():
-    job = call("create_video", prompt="a futuristic city at night", duration=10)
-
-    assert job.status == JobStatus.QUEUED
-    assert job.job_id
-    assert job.duration == 10
-    assert job.aspect_ratio == "16:9"
-
-
-def test_full_workflow_from_prompt_to_video(clock):
-    job = call("create_video", prompt="a futuristic city at night", duration=10)
-    job_id = job.job_id
-
-    clock.advance(QUEUED_SECONDS + 1.0)
-    assert call("get_video_status", job_id=job_id).status == JobStatus.RUNNING
-
-    clock.advance(RUNNING_SECONDS)
-    assert call("get_video_status", job_id=job_id).status == JobStatus.COMPLETED
-
-    result = call("get_video_result", job_id=job_id)
-    assert result.video_path.endswith(f"{job_id}.mp4")
+    ratio = plan_schema["properties"]["aspect_ratio"]
+    assert ratio.get("const") == "16:9" or ratio.get("enum") == ["16:9"]
 
 
-def test_cancel_video_stops_a_running_job(clock):
-    job_id = call("create_video", prompt="a slow render").job_id
-    clock.advance(QUEUED_SECONDS + 1.0)
+def test_list_models_does_not_dispatch(call_tool, comfy):
+    models = call_tool("list_video_models")
 
-    assert call("cancel_video", job_id=job_id).status == JobStatus.CANCELLED
-
-
-# -- errors the LLM has to recover from ----------------------------------
-
-
-def test_unknown_job_id_explains_how_to_get_a_valid_one():
-    with pytest.raises(ToolError) as exc:
-        call("get_video_status", job_id="does-not-exist")
-
-    assert "create_video" in str(exc.value)
+    assert len(models) == 1
+    assert models[0]["model"] == "ltx-2-5-fast"
+    assert models[0]["duration"] == 5
+    assert models[0]["aspect_ratio"] == "16:9"
+    assert models[0]["audio"] == "silent"
+    assert comfy.calls == []
 
 
-def test_requesting_a_result_too_early_says_to_keep_polling():
-    job_id = call("create_video", prompt="a futuristic city").job_id
+def test_full_tool_workflow(call_tool, backend, comfy):
+    Image.new("RGB", (640, 360), "navy").save(
+        backend.root / "incoming" / "photo.png"
+    )
 
-    with pytest.raises(ToolError) as exc:
-        call("get_video_result", job_id=job_id)
+    asset = call_tool("register_image", filename="photo.png")
+    plan = {
+        "asset_id": asset["asset_id"],
+        "prompt": "The camera moves slowly forward.",
+    }
 
-    assert "get_video_status" in str(exc.value)
+    estimate = call_tool("estimate_video_cost", plan=plan)
+
+    assert estimate["estimated_cost"] == pytest.approx(0.54)
+    assert estimate["generated_seconds"] == 6
+    assert estimate["delivered_seconds"] == 5
+    assert comfy.calls == []
+
+    job = call_tool("create_video", plan=plan)
+
+    assert job["status"] == "queued"
+    assert job["plan"]["duration"] == 5
+
+    comfy.jobs[job["comfy_id"]]["state"] = "running"
+
+    running = call_tool("get_video_status", job_id=job["job_id"])
+    assert running["status"] == "running"
+    assert running["progress"] is None
+
+    comfy.jobs[job["comfy_id"]]["state"] = "completed"
+
+    completed = call_tool("get_video_status", job_id=job["job_id"])
+    assert completed["status"] == "completed"
+
+    result = call_tool("get_video_result", job_id=job["job_id"])
+
+    assert result["status"] == "completed"
+    assert result["duration"] == 5
+    assert result["video_url"].endswith(f"/videos/{job['job_id']}.mp4")
 
 
-def test_cancelling_a_completed_job_is_rejected(clock):
-    job_id = call("create_video", prompt="a futuristic city").job_id
-    clock.advance(QUEUED_SECONDS + RUNNING_SECONDS)
+@pytest.mark.parametrize("changes", [
+    {"duration": 6},
+    {"duration": "5"},
+    {"duration": 5.0},
+    {"aspect_ratio": "9:16"},
+    {"model": "unsupported"},
+    {"audio": "enabled"},
+    {"prompt": ""},
+    {"prompt": "   "},
+    {"unexpected": True},
+])
+def test_invalid_plans_fail_before_dispatch(
+    call_tool, backend, comfy, plan, changes
+):
+    arguments = plan.model_dump(mode="json") | changes
 
     with pytest.raises(ToolError):
-        call("cancel_video", job_id=job_id)
+        call_tool("create_video", plan=arguments)
+
+    assert comfy.calls == []
+    assert list((backend.root / "jobs").glob("*.json")) == []
 
 
-@pytest.mark.parametrize(
-    "arguments",
-    [
-        {"prompt": ""},
-        {"prompt": "a city", "duration": 0},
-        {"prompt": "a city", "duration": 61},
-        {"prompt": "a city", "aspect_ratio": "5:4"},
-    ],
-    ids=["empty prompt", "duration too short", "duration too long", "bad ratio"],
-)
-def test_invalid_requests_are_rejected(arguments):
+def test_text_only_create_call_is_rejected(call_tool, comfy):
     with pytest.raises(ToolError):
-        call("create_video", **arguments)
+        call_tool("create_video", prompt="A city.")
+
+    assert comfy.calls == []
 
 
-def test_a_rejected_request_creates_no_job(backend):
+def test_unknown_asset_is_reported(call_tool, comfy):
+    with pytest.raises(ToolError, match="Unknown assets ID"):
+        call_tool(
+            "create_video",
+            plan={"asset_id": str(uuid4()), "prompt": "Slow zoom."},
+        )
+
+    assert comfy.calls == []
+
+
+def test_unknown_job_is_reported(call_tool, comfy):
+    with pytest.raises(ToolError, match="Unknown jobs ID"):
+        call_tool("get_video_status", job_id=str(uuid4()))
+
+    assert comfy.calls == []
+
+
+def test_invalid_job_id_is_rejected(call_tool, comfy):
     with pytest.raises(ToolError):
-        call("create_video", prompt="a city", duration=999)
+        call_tool("get_video_status", job_id="invalid")
 
-    assert backend._jobs == {}
-
-
-# -- more than one job at a time -----------------------------------------
+    assert comfy.calls == []
 
 
-def test_two_jobs_stay_independent(clock):
-    """The LLM has to keep two job_ids apart; the server must not merge them."""
-    first = call("create_video", prompt="a sunrise over mountains", aspect_ratio="9:16")
-    second = call("create_video", prompt="a city timelapse", duration=15)
+def test_result_is_unavailable_while_queued(call_tool, plan):
+    job = call_tool("create_video", plan=plan.model_dump(mode="json"))
 
-    assert first.job_id != second.job_id
-    assert first.aspect_ratio == "9:16"
-    assert second.duration == 15
+    with pytest.raises(ToolError, match="queued"):
+        call_tool("get_video_result", job_id=job["job_id"])
 
-    clock.advance(QUEUED_SECONDS + 1.0)
-    call("cancel_video", job_id=first.job_id)
 
-    assert call("get_video_status", job_id=first.job_id).status == JobStatus.CANCELLED
-    assert call("get_video_status", job_id=second.job_id).status == JobStatus.RUNNING
+def test_node_readiness_error_is_reported(call_tool, comfy, plan):
+    comfy.health.update(ready=False, missing=["ffmpeg"])
 
-    clock.advance(RUNNING_SECONDS)
-    assert call("get_video_status", job_id=second.job_id).status == JobStatus.COMPLETED
-    result = call("get_video_result", job_id=second.job_id)
-    assert result.prompt == "a city timelapse"
+    with pytest.raises(ToolError, match="not ready"):
+        call_tool("create_video", plan=plan.model_dump(mode="json"))
 
-    # The cancelled job stays cancelled and still has no result.
-    with pytest.raises(ToolError):
-        call("get_video_result", job_id=first.job_id)
+    assert comfy.jobs == {}
+
+
+def test_uncertain_submission_returns_job_without_retry(call_tool, comfy, plan):
+    comfy.accept_then_timeout = True
+
+    job = call_tool("create_video", plan=plan.model_dump(mode="json"))
+
+    assert job["status"] == "unknown"
+    assert "unknown" in job["message"].lower()
+    assert len(comfy.jobs) == 1
+
+
+def test_video_download_route(server_module, backend, comfy, plan):
+    job = backend.create(plan)
+    comfy.jobs[job.comfy_id]["state"] = "completed"
+    backend.result(job.job_id)
+
+    async def download():
+        app = server_module.mcp.http_app()
+        async with app.router.lifespan_context(app):
+            transport = httpx.ASGITransport(app=app)
+            async with httpx.AsyncClient(
+                transport=transport,
+                base_url="http://127.0.0.1",
+            ) as client:
+                return await client.get(f"/videos/{job.job_id}.mp4")
+
+    response = asyncio.run(download())
+
+    assert response.status_code == 200
+    assert response.content == comfy.video_bytes
+    assert response.headers["content-type"].startswith("video/mp4")
+
+
+def test_invalid_download_id_returns_404(server_module):
+    async def download():
+        app = server_module.mcp.http_app()
+        async with app.router.lifespan_context(app):
+            transport = httpx.ASGITransport(app=app)
+            async with httpx.AsyncClient(
+                transport=transport,
+                base_url="http://127.0.0.1",
+            ) as client:
+                return await client.get("/videos/invalid.mp4")
+
+    assert asyncio.run(download()).status_code == 404
