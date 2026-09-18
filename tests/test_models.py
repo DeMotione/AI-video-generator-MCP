@@ -1,7 +1,7 @@
 from uuid import uuid4
 
 import pytest
-from pydantic import field_validator
+from pydantic import ValidationError
 
 
 from video_mcp.models import (
@@ -35,13 +35,13 @@ def test_plan_defaults(plan_data):
     [0, 1, 4, 6, 10, 60, True, False, 5.0, "5", None],
 )
 def test_unsupported_duration_is_rejected(plan_data, duration):
-    with pytest.raises(field_validator):
+    with pytest.raises(ValidationError):
         GenerationPlan(**{**plan_data, "duration": duration})
 
 
 @pytest.mark.parametrize("ratio", ["9:16", "1:1", "4:3", "21:9", ""])
 def test_unsupported_orientation_is_rejected(plan_data, ratio):
-    with pytest.raises(field_validator):
+    with pytest.raises(ValidationError):
         GenerationPlan(**{**plan_data, "aspect_ratio": ratio})
 
 
@@ -55,13 +55,13 @@ def test_unsupported_orientation_is_rejected(plan_data, ratio):
     ],
 )
 def test_unsupported_options_are_rejected(plan_data, changes):
-    with pytest.raises(field_validator):
+    with pytest.raises(ValidationError):
         GenerationPlan(**{**plan_data, **changes})
 
 
 @pytest.mark.parametrize("prompt", ["", "   ", "\n\t", "a" * 2001])
 def test_invalid_prompt_is_rejected(plan_data, prompt):
-    with pytest.raises(field_validator):
+    with pytest.raises(ValidationError):
         GenerationPlan(**{**plan_data, "prompt": prompt})
 
 
@@ -78,19 +78,19 @@ def test_prompt_at_length_limit_is_accepted(plan_data):
 
 
 def test_asset_id_is_required():
-    with pytest.raises(field_validator):
+    with pytest.raises(ValidationError):
         GenerationPlan(prompt="A city.")
 
 
 def test_invalid_asset_id_is_rejected(plan_data):
-    with pytest.raises(field_validator):
+    with pytest.raises(ValidationError):
         GenerationPlan(**{**plan_data, "asset_id": "invalid"})
 
 
 def test_plan_is_immutable(plan_data):
     plan = GenerationPlan(**plan_data)
 
-    with pytest.raises(field_validator):
+    with pytest.raises(ValidationError):
         plan.duration = 6
 
 
@@ -124,7 +124,7 @@ def test_invalid_asset_metadata_is_rejected(changes):
         "sha256": "a" * 64,
     }
 
-    with pytest.raises(field_validator):
+    with pytest.raises(ValidationError):
         ImageAsset(**{**data, **changes})
 
 
@@ -145,7 +145,7 @@ def test_job_json_round_trip(plan_data):
 
 @pytest.mark.parametrize("progress", [-1, 101])
 def test_invalid_job_progress_is_rejected(plan_data, progress):
-    with pytest.raises(field_validator):
+    with pytest.raises(ValidationError):
         VideoJob(
             job_id=uuid4(),
             plan=GenerationPlan(**plan_data),
@@ -178,7 +178,7 @@ def test_completed_result_defaults():
 
 @pytest.mark.parametrize("status", ["queued", "running", "failed", "unknown"])
 def test_result_requires_completed_status(status):
-    with pytest.raises(field_validator):
+    with pytest.raises(ValidationError):
         VideoResult(
             job_id=uuid4(),
             status=status,
