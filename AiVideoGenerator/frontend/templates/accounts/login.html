@@ -1,0 +1,42 @@
+{% extends 'base.html' %}
+{% load static %}
+{% block title %}Log in · AiVideoGenerator{% endblock %}
+{% block body_class %}login-page{% endblock %}
+{% block content %}
+<main class="login-shell">
+    <section class="login-story" aria-label="AiVideoGenerator creative studio">
+        <a class="brand brand-light" href="/" aria-label="AiVideoGenerator home">
+            <img src="{% static 'mark.svg' %}" alt="" width="38" height="38">
+            <span>AiVideoGenerator<span class="brand-subtitle">YOUR PRIVATE CREATIVE STUDIO</span></span>
+        </a>
+        <div class="story-copy"><div class="eyebrow light-eyebrow">A LITTLE IMAGINATION. A WHOLE NEW SCENE.</div>
+            <h1>Still images.<br><span>Moving stories.</span></h1>
+            <p>Turn the image in front of you into the scene in your head.</p>
+        </div>
+        <div class="film-art" aria-hidden="true">
+            <div class="film-frame frame-back"><div class="art-sky"></div><div class="art-sun"></div><div class="art-hill hill-back"></div><div class="art-hill hill-front"></div><span class="frame-number">01 / THE IDEA</span></div>
+            <div class="film-frame frame-front"><div class="art-sky"></div><div class="art-sun"></div><div class="art-hill hill-back"></div><div class="art-hill hill-front"></div><div class="play-symbol">▶</div><span class="frame-number">02 / THE POSSIBILITIES</span><div class="film-timeline"><i></i></div></div>
+            <span class="art-caption">FROM ONE FRAME TO WHAT COMES NEXT</span>
+        </div>
+        <div class="story-footer"><span class="small-dot"></span> A space for your next idea.</div>
+    </section>
+    <section class="login-panel">
+        <span class="private-label"><span class="small-dot"></span> PRIVATE WORKSPACE</span>
+        <div class="login-form-wrap">
+            <div class="eyebrow">WELCOME BACK</div>
+            <h2>Make something<br>worth watching.</h2>
+            <p class="muted">Log in to your creative workspace.</p>
+            <form method="post" class="login-form">
+                {% csrf_token %}
+                {% if next %}<input type="hidden" name="next" value="{{ next }}">{% endif %}
+                {% if form.non_field_errors %}<div class="form-error" role="alert">{{ form.non_field_errors }}</div>{% endif %}
+                <div class="field"><label for="{{ form.username.id_for_label }}">Email address</label>{{ form.username }}{{ form.username.errors }}</div>
+                <div class="field"><label for="{{ form.password.id_for_label }}">Password</label>{{ form.password }}{{ form.password.errors }}</div>
+                <button type="submit" class="primary-button login-button">Log in <span aria-hidden="true">↗</span></button>
+            </form>
+            <p class="account-note">Need access? Ask your workspace administrator.</p>
+        </div>
+        <div class="login-footer">Your images. Your ideas. Your studio.<span>AiVideoGenerator / 01</span></div>
+    </section>
+</main>
+{% endblock %}

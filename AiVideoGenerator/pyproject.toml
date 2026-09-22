@@ -1,0 +1,27 @@
+[project]
+name = "ai-video-generator-web"
+version = "0.1.0"
+description = "Private Django image-to-video studio backed by your ComfyUI GPU"
+requires-python = ">=3.12,<3.15"
+dependencies = [
+    "Django>=5.2,<5.3",
+    "httpx>=0.28,<0.29",
+    "Pillow>=11,<13",
+    "python-dotenv>=1,<2",
+]
+
+[project.optional-dependencies]
+oracle = ["oracledb>=3,<5", "oci>=2,<3"]
+
+[dependency-groups]
+dev = ["ruff>=0.8"]
+
+[tool.ruff]
+target-version = "py312"
+line-length = 96
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+
+[tool.ruff.lint.per-file-ignores]
+"*/migrations/*.py" = ["E501"]

@@ -1,0 +1,51 @@
+{% extends 'base.html' %}
+{% load static %}
+{% block body_class %}studio-page{% endblock %}
+{% block content %}
+<div class="app-shell" id="app" data-max-image-mb="{{ max_image_mb }}">
+    <aside class="sidebar" id="sidebar">
+        <a class="brand brand-light" href="/"><img src="{% static 'mark.svg' %}" alt="" width="36" height="36"><span>AiVideoGenerator<span class="brand-subtitle">CREATIVE WORKSPACE</span></span></a>
+        <button type="button" id="new-chat" class="new-chat"><span aria-hidden="true">+</span> New creation <kbd>N</kbd></button>
+        <div class="sidebar-label">YOUR CREATIONS <span id="creation-count">0</span></div>
+        <nav id="conversations" aria-label="Saved creations"></nav>
+        <div class="sidebar-bottom"><div class="workspace-note"><span class="small-dot"></span> Private workspace</div><div class="profile"><div class="avatar">{{ user.display_name|first|upper }}</div><div><strong>{{ user.display_name }}</strong><span>{{ user.get_role_display }}</span></div></div></div>
+    </aside>
+    <main class="main-panel">
+        <header class="topbar">
+            <div class="topbar-left"><button type="button" class="icon-button mobile-menu" id="menu-toggle" aria-label="Toggle navigation" aria-expanded="false">☰</button><span class="breadcrumb">Workspace <span>/</span> <strong>Video studio</strong></span></div>
+            <div class="topbar-right"><span class="studio-badge"><span class="small-dot"></span> Image to video</span><form method="post" action="{% url 'accounts:logout' %}">{% csrf_token %}<button class="logout-button" type="submit">Log out <span aria-hidden="true">↗</span></button></form></div>
+        </header>
+        <div class="workspace-scroll" id="workspace-scroll">
+            <div class="welcome" id="welcome">
+                <span class="welcome-symbol" aria-hidden="true">✳</span>
+                <div class="eyebrow">YOUR NEXT SCENE STARTS HERE</div>
+                <h1>Give your image<br><em>a little motion.</em></h1>
+                <p>Drop in an image. Describe what happens next.<br>Bring your idea to life, one scene at a time.</p>
+                <div class="inspiration-label">A LITTLE INSPIRATION</div>
+                <div class="suggestions">
+                    <button class="suggestion" data-prompt="A slow cinematic push-in toward the subject. Soft natural light, subtle movement, a calm and atmospheric scene."><span class="suggestion-art landscape-art"><i></i></span><span><strong>Set the scene</strong><small>A cinematic camera move</small></span><b aria-hidden="true">↗</b></button>
+                    <button class="suggestion" data-prompt="The character takes a few gentle steps forward, looking around with curiosity. Preserve the character’s appearance and the original scene."><span class="suggestion-art character-art"><i></i></span><span><strong>Bring it to life</strong><small>A character in motion</small></span><b aria-hidden="true">↗</b></button>
+                    <button class="suggestion" data-prompt="A smooth, subtle camera orbit around the product. Clean studio light and soft reflections. Preserve the product’s shape and details."><span class="suggestion-art product-art"><i></i></span><span><strong>Find a new angle</strong><small>A polished product shot</small></span><b aria-hidden="true">↗</b></button>
+                </div>
+            </div>
+            <section id="messages" class="messages" aria-label="Your conversation" hidden></section>
+        </div>
+        <div class="composer-area">
+            {% if not workflow_ready %}<div class="setup-notice">Your workspace is ready. An administrator needs to connect the video renderer before your first generation.</div>{% endif %}
+            <div id="error-banner" class="form-error composer-error" role="alert" hidden></div>
+            <form id="generation-form" class="composer" enctype="multipart/form-data">
+                {% csrf_token %}
+                <div id="attachment" class="attachment" hidden><img id="attachment-preview" alt="Attached image"><div><strong id="attachment-name"></strong><small>Starting frame</small></div><button id="remove-image" type="button" class="icon-button" aria-label="Remove image">×</button></div>
+                <label for="prompt" class="sr-only">Describe your video</label>
+                <textarea id="prompt" name="prompt" rows="2" maxlength="2000" placeholder="Describe your scene and how it moves…" required></textarea>
+                <div class="composer-controls"><div class="composer-options"><button type="button" id="attach-button" class="attach-button"><span aria-hidden="true">+</span> Add image</button><span class="composer-divider"></span><span class="format-label">Image → Video</span></div><button type="submit" id="generate-button" class="primary-button generate-button">Generate <span aria-hidden="true">↑</span></button></div>
+                <input type="file" id="image-input" accept="image/png,image/jpeg,image/webp" hidden>
+            </form>
+            <div class="composer-help"><span>Paste or drop an image · PNG, JPG, WebP · Up to {{ max_image_mb }} MB</span><span id="character-count">0 / 2,000</span></div>
+        </div>
+    </main>
+</div>
+<div class="sr-only" id="announcer" role="status" aria-live="polite"></div>
+<noscript><p class="noscript-message">Enable JavaScript to upload images and use the video studio.</p></noscript>
+{% endblock %}
+{% block scripts %}<script src="{% static 'js/studio.js' %}" defer></script>{% endblock %}

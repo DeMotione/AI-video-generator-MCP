@@ -98,3 +98,16 @@ temp/
 build/
 dist/
 *.egg-info/
+
+# ==============================
+# Django website
+# ==============================
+
+/AiVideoGenerator/.runtime/
+/AiVideoGenerator/staticfiles/
+/AiVideoGenerator/wallets/
+/AiVideoGenerator/workflows/local.json
+
+# Private keys and certificates
+*.key
+*.pem
