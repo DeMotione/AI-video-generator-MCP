@@ -1,3 +1,24 @@
+# Test Results — 2026-10-03: RunPod backend
+
+`uv run pytest -q` → **167 passed, 0 failed**; 35 of them cover the RunPod
+backend against a stubbed RunPod API (no network, no spend).
+
+One paid end-to-end job: `check-agent.py` on the VM with `photo.png` and a
+walking/camera-tracking prompt. Agent → Gemma 3 12B (7 min 48 s to decide) →
+MCP `create_video` → RunPod `/run` → MP4 saved on the VM and downloaded.
+
+| Measure | Result |
+| --- | --- |
+| Output | 1024x576, 24 fps, 121 frames, 5.04 s, H.264 yuv420p, no audio, 1.8 MB |
+| Content | First frame matches the photo; the apple keeps its identity and walks toward the camera |
+| RunPod | 33 s waiting for the worker (cold, models linked from the model cache), 73 s execution |
+| Cost | $0.037 (balance 9.7471 → 9.7105), versus $0.54 per clip on the LTX API |
+
+A second `create_video` from `scripts/generate_video.py`, sent two seconds
+after the agent's, was refused by the one-active-job guard before reaching
+RunPod. Known issue 1 below (`photo.png` cannot register) is fixed: images
+within 2% of 16:9 are center-cropped.
+
 # Test Results — 2026-09-15
 
 Manual end-to-end verification of the AI-video-generator MCP stack after

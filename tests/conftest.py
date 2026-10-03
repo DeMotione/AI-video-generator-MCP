@@ -218,6 +218,7 @@ def expected_tools():
         "create_video",
         "get_video_status",
         "get_video_result",
+        "cancel_video",
     }
 
 

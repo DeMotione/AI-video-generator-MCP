@@ -21,6 +21,9 @@ from video_mcp.models import (
 
 PRESET = "ltx25-fast-5s-16x9-v1"
 MAX_IMAGE_BYTES = 10 * 1024 * 1024
+# How far an image's aspect ratio may stray from 16:9 before it is rejected
+# rather than center-cropped.
+ASPECT_TOLERANCE = 0.02
 
 
 class VideoServiceError(Exception):
@@ -37,6 +40,19 @@ class ComfyBackend:
 
         for folder in ("incoming", "assets", "jobs", "outputs"):
             (self.root / folder).mkdir(parents=True, exist_ok=True)
+
+    def describe(self) -> dict:
+        return {
+            "model": "ltx-2-5-fast",
+            "duration": 5,
+            "aspect_ratio": "16:9",
+            "resolution": "1280x720",
+            "audio": "silent",
+            "generated_seconds": 6,
+            "estimated_usd": 0.54,
+            "backend": "comfyui",
+            "notice": "Generates through the configured ComfyUI backend.",
+        }
 
     def _write(self, path: Path, content: bytes):
         temporary = path.with_name(f"{path.name}.{uuid4().hex}.tmp")
@@ -116,12 +132,20 @@ class ComfyBackend:
 
                 if width < 320 or height < 180:
                     raise ValueError("Minimum image size is 320×180.")
-                if width * 9 != height * 16:
+                if abs(width * 9 - height * 16) > height * 16 * ASPECT_TOLERANCE:
                     raise ValueError("This preset requires a 16:9 image.")
 
                 rgba = frame.convert("RGBA")
                 rgb = Image.new("RGB", rgba.size, "white")
                 rgb.paste(rgba, mask=rgba.getchannel("A"))
+
+                # A near-16:9 image such as 1672x941 can never be exact, so
+                # trim the surplus pixel rows/columns evenly from both sides.
+                crop_width = min(width, round(height * 16 / 9))
+                crop_height = min(height, round(width * 9 / 16))
+                left = (width - crop_width) // 2
+                top = (height - crop_height) // 2
+                rgb = rgb.crop((left, top, left + crop_width, top + crop_height))
 
                 normalized = io.BytesIO()
                 rgb.resize(
@@ -245,11 +269,18 @@ class ComfyBackend:
         self._save("jobs", job.job_id, job)
         return job
 
+    def cancel(self, job_id: UUID) -> VideoJob:
+        self._load("jobs", job_id, VideoJob)
+        raise VideoServiceError(
+            "This backend cannot cancel jobs. Inspect ComfyUI instead."
+        )
+
     def status(self, job_id: UUID) -> VideoJob:
         job = self._load("jobs", job_id, VideoJob)
         if job.status in {
             JobStatus.COMPLETED,
             JobStatus.FAILED,
+            JobStatus.CANCELLED,
             JobStatus.UNKNOWN,
         }:
             return job
@@ -371,6 +402,16 @@ class DemoBackend(ComfyBackend):
         self.demo_delay = max(
             0, float(os.getenv("AI_VIDEO_DEMO_DELAY_SECONDS", "2"))
         )
+
+    def describe(self) -> dict:
+        return super().describe() | {
+            "estimated_usd": 0.0,
+            "backend": "prepared-demo",
+            "notice": (
+                "Returns a prepared demonstration, not a video generated "
+                "from the image."
+            ),
+        }
 
     def _validate_demo_file(self):
         if not self.demo_file.is_file():

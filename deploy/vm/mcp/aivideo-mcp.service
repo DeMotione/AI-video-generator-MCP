@@ -1,0 +1,26 @@
+[Unit]
+Description=AI Video Generator MCP Server
+Wants=network-online.target
+After=network-online.target
+Before=aivideo-agent.service
+StartLimitIntervalSec=60
+StartLimitBurst=5
+
+[Service]
+Type=simple
+User=ubuntu
+WorkingDirectory=/home/ubuntu/ai-video-mcp
+Environment=PYTHONUNBUFFERED=1
+EnvironmentFile=/home/ubuntu/ai-video-mcp/.env
+ExecStart=/home/ubuntu/ai-video-mcp/start-mcp.sh
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=30
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
