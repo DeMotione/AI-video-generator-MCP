@@ -1,6 +1,8 @@
 import hashlib
 import io
 import os
+import shutil
+from datetime import UTC, datetime
 from pathlib import Path
 from uuid import UUID, uuid4
 
@@ -90,6 +92,12 @@ class ComfyBackend:
 
         with path.open("rb") as source:
             raw = source.read(MAX_IMAGE_BYTES + 1)
+
+        return self.register_image_bytes(raw)
+
+    def register_image_bytes(self, raw: bytes) -> ImageAsset:
+        if not raw:
+            raise VideoServiceError("Image is empty.")
 
         if len(raw) > MAX_IMAGE_BYTES:
             raise VideoServiceError("Image exceeds 10 MiB.")
@@ -342,3 +350,86 @@ class ComfyBackend:
                 if self.public_url else None
             ),
         )
+
+class DemoBackend(ComfyBackend):
+    """Serves a prepared video instead of generating one.
+
+    Lets the agent and tool surface be exercised end to end without a GPU,
+    a ComfyUI instance or any billable generation. Every response says
+    plainly that the video is not derived from the submitted image.
+    """
+
+    def __init__(self, root: Path | None = None):
+        super().__init__(root)
+        configured = os.getenv(
+            "AI_VIDEO_DEMO_FILE", "data/demo/prepared-demo.mp4"
+        )
+        path = Path(configured)
+        self.demo_file = (
+            path if path.is_absolute() else self.root.parent / path
+        )
+        self.demo_delay = max(
+            0, float(os.getenv("AI_VIDEO_DEMO_DELAY_SECONDS", "2"))
+        )
+
+    def _validate_demo_file(self):
+        if not self.demo_file.is_file():
+            raise VideoServiceError(
+                f"Prepared demo video is missing: {self.demo_file}"
+            )
+        with self.demo_file.open("rb") as source:
+            header = source.read(64)
+        if b"ftyp" not in header:
+            raise VideoServiceError(
+                "Prepared demo video is not a valid MP4 file."
+            )
+
+    def estimate(self, plan: GenerationPlan) -> VideoEstimate:
+        self.validate_plan(plan)
+        self._validate_demo_file()
+        return VideoEstimate(
+            estimated_cost=0,
+            basis="Prepared demonstration video; no generation or billing.",
+        )
+
+    def create(self, plan: GenerationPlan) -> VideoJob:
+        plan, _, _ = self.validate_plan(plan)
+        self._validate_demo_file()
+        job = VideoJob(
+            job_id=uuid4(),
+            plan=plan,
+            status=JobStatus.QUEUED,
+            progress=0,
+            message=(
+                "Prepared demonstration queued. This video is not generated "
+                "from the uploaded image."
+            ),
+        )
+        destination = self.root / "outputs" / f"{job.job_id}.mp4"
+        temporary = destination.with_name(
+            f"{destination.name}.{uuid4().hex}.tmp"
+        )
+        shutil.copyfile(self.demo_file, temporary)
+        temporary.replace(destination)
+        self._save("jobs", job.job_id, job)
+        return job
+
+    def status(self, job_id: UUID) -> VideoJob:
+        job = self._load("jobs", job_id, VideoJob)
+        if job.status != JobStatus.QUEUED:
+            return job
+
+        now = datetime.now(UTC)
+        if (now - job.created_at).total_seconds() < self.demo_delay:
+            return job
+
+        job = job.model_copy(update={
+            "status": JobStatus.COMPLETED,
+            "progress": 100,
+            "message": (
+                "Prepared demonstration ready. This video was not generated "
+                "from the uploaded image."
+            ),
+        })
+        self._save("jobs", job.job_id, job)
+        return job

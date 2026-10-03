@@ -1,4 +1,7 @@
 import asyncio
+import base64
+import binascii
+import os
 from contextlib import contextmanager
 from uuid import UUID
 
@@ -15,11 +18,18 @@ from video_mcp.models import (
     VideoJob,
     VideoResult,
 )
-from video_mcp.video import ComfyBackend, VideoServiceError
+from video_mcp.video import (
+    MAX_IMAGE_BYTES,
+    ComfyBackend,
+    DemoBackend,
+    VideoServiceError,
+)
 
 
 mcp = FastMCP("AI Video Generator")
-backend = ComfyBackend()
+
+BACKENDS = {"demo": DemoBackend, "comfy": ComfyBackend}
+backend = BACKENDS[os.getenv("VIDEO_BACKEND", "comfy")]()
 
 
 @contextmanager
@@ -39,6 +49,7 @@ def tool_errors():
 @mcp.tool(annotations={"readOnlyHint": True})
 def list_video_models() -> list[dict]:
     """List supported generation models and the single available preset."""
+    demo = isinstance(backend, DemoBackend)
     return [{
         "model": "ltx-2-5-fast",
         "duration": 5,
@@ -46,7 +57,14 @@ def list_video_models() -> list[dict]:
         "resolution": "1280x720",
         "audio": "silent",
         "generated_seconds": 6,
-        "estimated_usd": 0.54,
+        "estimated_usd": 0.0 if demo else 0.54,
+        "backend": "prepared-demo" if demo else "comfyui",
+        "notice": (
+            "Returns a prepared demonstration, not a video generated "
+            "from the image."
+            if demo
+            else "Generates through the configured ComfyUI backend."
+        ),
     }]
 
 
@@ -59,6 +77,24 @@ def register_image(filename: str) -> ImageAsset:
     """
     with tool_errors():
         return backend.register_image(filename)
+
+
+@mcp.tool
+def register_image_base64(image_base64: str) -> ImageAsset:
+    """Register uploaded JPEG, PNG or WebP bytes encoded as raw base64.
+
+    Use this when the image is not already on the server's disk, such as
+    from a remote agent. Same rules as register_image: static 16:9, at
+    least 320x180, up to 4096px, and at most 10 MiB once decoded.
+    """
+    with tool_errors():
+        if len(image_base64) > 4 * ((MAX_IMAGE_BYTES + 2) // 3):
+            raise VideoServiceError("Encoded image exceeds the 10 MiB limit.")
+        try:
+            content = base64.b64decode(image_base64, validate=True)
+        except (ValueError, binascii.Error) as exc:
+            raise VideoServiceError("Image is not valid base64.") from exc
+        return backend.register_image_bytes(content)
 
 
 @mcp.tool(annotations={"readOnlyHint": True})
@@ -107,6 +143,24 @@ async def download_video(request: Request):
         media_type="video/mp4",
         filename=f"{result.job_id}.mp4",
     )
+
+
+@mcp.custom_route("/healthz", methods=["GET"])
+async def healthz(_request: Request):
+    try:
+        if isinstance(backend, DemoBackend):
+            backend._validate_demo_file()
+    except VideoServiceError as exc:
+        return JSONResponse(
+            {"status": "not_ready", "detail": str(exc)}, status_code=503
+        )
+
+    return JSONResponse({
+        "status": "ready",
+        "backend": (
+            "prepared-demo" if isinstance(backend, DemoBackend) else "comfyui"
+        ),
+    })
 
 
 if __name__ == "__main__":
