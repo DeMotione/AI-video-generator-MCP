@@ -130,6 +130,12 @@ PRIVATE_STORAGE_ROOT = RUNTIME_ROOT / "private"
 STORAGE_BACKEND = os.getenv("STORAGE_BACKEND", "local")
 if STORAGE_BACKEND not in {"local", "oci"}:
     raise ImproperlyConfigured("STORAGE_BACKEND must be local or oci.")
+GENERATION_BACKEND = os.getenv("GENERATION_BACKEND", "agent")
+if GENERATION_BACKEND not in {"agent", "comfy"}:
+    raise ImproperlyConfigured("GENERATION_BACKEND must be agent or comfy.")
+AGENT_URL = os.getenv("AGENT_URL", "http://127.0.0.1:8100").rstrip("/")
+AGENT_API_TOKEN = os.getenv("AGENT_API_TOKEN", "")
+AGENT_JOB_TIMEOUT_SECONDS = int(os.getenv("AGENT_JOB_TIMEOUT_SECONDS", "3600"))
 COMFY_URL = os.getenv("COMFY_URL", "http://127.0.0.1:8188").rstrip("/")
 COMFY_WORKFLOW_PATH = BASE_DIR / os.getenv("COMFY_WORKFLOW_PATH", "workflows/local.json")
 COMFY_IMAGE_NODE_ID = os.getenv("COMFY_IMAGE_NODE_ID", "")

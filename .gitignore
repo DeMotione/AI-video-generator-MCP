@@ -72,10 +72,12 @@ videos/
 *.avi
 *.mkv
 
-# Runtime data written by the MCP server (data/incoming is kept)
-data/assets/
-data/jobs/
-data/runpod/
+# Runtime data written by the MCP server (data/incoming is kept) 
+# Temporaliy disabled before we move everything to the VM
+# data/assets/
+# data/jobs/
+# data/runpod/
+# deploy/vm/agent/data/
 
 # ==============================
 # Logs

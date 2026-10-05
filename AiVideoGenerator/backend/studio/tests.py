@@ -46,6 +46,7 @@ class StudioTests(TestCase):
         override = override_settings(
             PRIVATE_STORAGE_ROOT=root / "private",
             STORAGE_BACKEND="local",
+            GENERATION_BACKEND="comfy",
             COMFY_WORKFLOW_PATH=self.workflow,
             COMFY_IMAGE_NODE_ID="1",
             COMFY_PROMPT_NODE_ID="2",

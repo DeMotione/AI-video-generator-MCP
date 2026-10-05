@@ -1,0 +1,20 @@
+[Unit]
+Description=AI Video Generator website queue worker
+Wants=network-online.target
+After=network-online.target aivideo-agent.service
+
+[Service]
+Type=simple
+User=ubuntu
+WorkingDirectory=/home/ubuntu/aivideo-web
+Environment=PYTHONUNBUFFERED=1
+EnvironmentFile=/home/ubuntu/aivideo-web/.env
+ExecStart=/home/ubuntu/aivideo-web/AiVideoGenerator/.venv/bin/python AiVideoGenerator/backend/manage.py runworker
+Restart=on-failure
+RestartSec=5
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

@@ -23,8 +23,17 @@ def normalize_image(upload):
                 background = Image.new("RGBA", corrected.size, "white")
                 background.alpha_composite(corrected)
                 image = background.convert("RGB")
+                if settings.GENERATION_BACKEND == "agent":
+                    width, height = image.size
+                    if width < 320 or height < 180:
+                        raise ValueError("Use an image at least 320 by 180 pixels.")
+                    if abs(width * 9 - height * 16) > height * 16 * 0.02:
+                        raise ValueError("Use a landscape 16:9 image for this video preset.")
                 buffer = io.BytesIO()
                 image.save(buffer, format="PNG")
+                if settings.GENERATION_BACKEND == "agent" and buffer.tell() > 10 * 1024 * 1024:
+                    buffer.close()
+                    raise ValueError("The normalized image exceeds the 10 MiB upload limit.")
                 buffer.seek(0)
                 return buffer, image.width, image.height
     except (

@@ -14,8 +14,10 @@ from django.views.decorators.cache import never_cache
 from django.views.decorators.http import require_GET, require_POST
 
 from .models import Conversation, Generation
-from .services.comfy import ComfyError, configured, load_workflow
+from .services.agent import AgentError
+from .services.comfy import ComfyError
 from .services.images import normalize_image
+from .services.renderer import configured, validate_renderer
 from .services.storage import get_storage
 
 logger = logging.getLogger(__name__)
@@ -124,9 +126,9 @@ def generate(request, conversation_id):
             {"error": "Attach or paste an image to start your video."}, status=400
         )
     try:
-        load_workflow()
+        validate_renderer()
         normalized, width, height = normalize_image(upload)
-    except (ComfyError, ValueError) as exc:
+    except (AgentError, ComfyError, ValueError) as exc:
         return JsonResponse({"error": str(exc)}, status=400)
     key = f"users/{request.user.pk}/images/{identifier}.png"
     stored = False
@@ -154,6 +156,7 @@ def generate(request, conversation_id):
                 id=identifier,
                 conversation=conversation,
                 prompt=prompt,
+                backend=settings.GENERATION_BACKEND,
                 image_key=key,
                 image_name=upload.name[:150],
                 image_width=width,

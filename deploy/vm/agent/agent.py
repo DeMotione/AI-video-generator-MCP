@@ -1,15 +1,17 @@
 import asyncio
 import base64
 import binascii
+import hashlib
 import io
 import json
 import logging
 import os
 import secrets
-from contextlib import asynccontextmanager
+import sqlite3
+from contextlib import asynccontextmanager, contextmanager
 from pathlib import Path
 from typing import Any, Literal
-from urllib.parse import urlsplit
+from urllib.parse import urlsplit, urlunsplit
 from uuid import UUID, uuid4
 
 import httpx
@@ -22,7 +24,8 @@ from fastmcp.exceptions import ToolError
 from jsonschema import Draft202012Validator
 from PIL import Image, UnidentifiedImageError
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
-from starlette.responses import JSONResponse
+from starlette.background import BackgroundTask
+from starlette.responses import JSONResponse, StreamingResponse
 
 load_dotenv(Path(__file__).with_name(".env"), override=False)
 logger = logging.getLogger("aivideo.agent")
@@ -35,6 +38,45 @@ MAX_TOOL_CALLS = 5
 MAX_IMAGE_BYTES = 10 * 1024 * 1024
 MAX_BASE64_CHARS = 4 * ((MAX_IMAGE_BYTES + 2) // 3)
 MAX_BODY_BYTES = MAX_BASE64_CHARS + 65536
+JOB_ROOT = Path(os.getenv("AGENT_JOB_ROOT", str(Path(__file__).parent / "data")))
+
+
+@contextmanager
+def job_database():
+    JOB_ROOT.mkdir(parents=True, exist_ok=True)
+    connection = sqlite3.connect(JOB_ROOT / "requests.sqlite3", timeout=10)
+    connection.row_factory = sqlite3.Row
+    connection.execute(
+        "CREATE TABLE IF NOT EXISTS requests (request_id TEXT PRIMARY KEY, "
+        "fingerprint TEXT NOT NULL, status TEXT NOT NULL, job_id TEXT, "
+        "message TEXT NOT NULL DEFAULT '')"
+    )
+    try:
+        with connection:
+            yield connection
+    finally:
+        connection.close()
+
+
+def saved_request(request_id):
+    with job_database() as database:
+        row = database.execute(
+            "SELECT * FROM requests WHERE request_id = ?", (str(request_id),)
+        ).fetchone()
+    return dict(row) if row else None
+
+
+def update_request(request_id, status, message, job_id=None):
+    with job_database() as database:
+        database.execute(
+            "UPDATE requests SET status = ?, message = ?, "
+            "job_id = COALESCE(?, job_id) WHERE request_id = ?",
+            (status, message[:500], job_id, str(request_id)),
+        )
+
+
+def request_data(record):
+    return {key: record[key] for key in ("request_id", "status", "job_id", "message")}
 
 
 class ChatRequest(BaseModel):
@@ -82,7 +124,7 @@ class RequestGuard:
                     headers={"WWW-Authenticate": "Bearer"},
                 )
                 return await response(scope, receive, send)
-        if scope["path"] == "/chat" and scope["method"] == "POST":
+        if scope["path"] in {"/chat", "/jobs"} and scope["method"] == "POST":
             chunks = []
             size = 0
             while True:
@@ -127,13 +169,30 @@ async def lifespan(application):
     if REQUEST_TIMEOUT <= 0:
         raise RuntimeError("AGENT_REQUEST_TIMEOUT_SECONDS must be positive.")
     application.state.inference_lock = asyncio.Lock()
+    application.state.tasks = set()
+    # A recorded provider job can be polled after restart. An interrupted
+    # decision/submission must never be retried as a new paid request.
+    with job_database() as database:
+        database.execute(
+            "UPDATE requests SET status = 'unknown', "
+            "message = 'Agent restarted before acceptance was recorded. Inspect the MCP jobs.' "
+            "WHERE status IN ('planning', 'submitting')"
+        )
+    for image_path in JOB_ROOT.glob("*.image.tmp"):
+        image_path.unlink(missing_ok=True)
     async with httpx.AsyncClient(
         base_url=OLLAMA_URL,
         timeout=httpx.Timeout(REQUEST_TIMEOUT, connect=10),
         trust_env=False,
     ) as model_client:
         application.state.model_client = model_client
-        yield
+        try:
+            yield
+        finally:
+            tasks = list(application.state.tasks)
+            for task in tasks:
+                task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
 
 
 app = FastAPI(lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None)
@@ -293,7 +352,9 @@ async def follow_job(client, job_id, results, started):
     )
 
 
-async def process_question(client, tools, payload, model_client):
+async def process_question(
+    client, tools, payload, model_client, on_submission=None, on_created=None
+):
     started = asyncio.get_running_loop().time()
     hidden_tools = {"register_image_base64", "register_image"}
     catalog = [
@@ -408,6 +469,8 @@ async def process_question(client, tools, payload, model_client):
                 await asyncio.sleep(max(0, 5 - (now - last_poll)))
             polled_jobs[job_id] = asyncio.get_running_loop().time()
         calls += 1
+        if decision.tool_name == "create_video" and on_submission:
+            on_submission()
         try:
             result = await client.call_tool(
                 decision.tool_name,
@@ -429,6 +492,9 @@ async def process_question(client, tools, payload, model_client):
         if decision.tool_name == "create_video" and not failed:
             job_id = nested_field(data, "job_id")
             if isinstance(job_id, str):
+                if on_created:
+                    on_created(data)
+                    return {"status": "pending", "tool_results": results}
                 return await follow_job(client, job_id, results, started)
         messages.append({"role": "assistant", "content": decision.model_dump_json()})
         messages.append(
@@ -447,6 +513,163 @@ async def process_question(client, tools, payload, model_client):
         "tool_results": results,
         "status": "step_limit",
     }
+
+
+async def plan_request(payload, application, image_path):
+    try:
+        async with asyncio.timeout(REQUEST_TIMEOUT):
+            payload = payload.model_copy(
+                update={"image_base64": base64.b64encode(image_path.read_bytes()).decode()}
+            )
+            async with mcp_client() as client:
+                tools = await client.list_tools()
+
+                def submitting():
+                    update_request(
+                        payload.request_id, "submitting", "Sending the video request to RunPod."
+                    )
+
+                def created(data):
+                    remote_status = nested_field(data, "status")
+                    state = (
+                        remote_status
+                        if remote_status in {"failed", "unknown", "cancelled", "completed"}
+                        else "running"
+                    )
+                    update_request(
+                        payload.request_id,
+                        state,
+                        nested_field(data, "message") or "Generating your video.",
+                        str(UUID(nested_field(data, "job_id"))),
+                    )
+
+                result = await process_question(
+                    client,
+                    tools,
+                    payload,
+                    application.state.model_client,
+                    on_submission=submitting,
+                    on_created=created,
+                )
+            record = saved_request(payload.request_id)
+            if not record["job_id"]:
+                # A tool error may conceal provider acceptance; preserve uncertainty.
+                state = "unknown" if record["status"] == "submitting" else "failed"
+                update_request(
+                    payload.request_id,
+                    state,
+                    result.get("answer") or "The agent did not confirm a video submission.",
+                )
+    except (Exception, asyncio.CancelledError) as exc:
+        record = saved_request(payload.request_id)
+        if not record["job_id"]:
+            state = "unknown" if record["status"] == "submitting" else "failed"
+            update_request(
+                payload.request_id,
+                state,
+                "Agent processing was interrupted. Check the recorded job before retrying.",
+            )
+        logger.warning("Video request %s interrupted (%s).", payload.request_id, type(exc).__name__)
+    finally:
+        try:
+            image_path.unlink(missing_ok=True)
+        finally:
+            application.state.inference_lock.release()
+
+
+@app.post("/jobs")
+async def submit_request(payload: ChatRequest, request: Request):
+    if not payload.image_base64:
+        raise HTTPException(status_code=400, detail="Attach an image to generate a video.")
+    await asyncio.to_thread(validate_image, payload.image_base64)
+    image = base64.b64decode(payload.image_base64, validate=True)
+    fingerprint = hashlib.sha256(payload.prompt.encode() + b"\0" + image).hexdigest()
+    existing = saved_request(payload.request_id)
+    if existing:
+        if existing["fingerprint"] != fingerprint:
+            raise HTTPException(status_code=409, detail="Request ID belongs to another input.")
+        return JSONResponse(request_data(existing), status_code=200)
+    lock = request.app.state.inference_lock
+    with job_database() as database:
+        active = database.execute(
+            "SELECT 1 FROM requests WHERE status IN ('planning', 'submitting', 'running')"
+        ).fetchone()
+    if lock.locked() or active:
+        raise HTTPException(status_code=429, detail="Agent is busy.", headers={"Retry-After": "5"})
+    await lock.acquire()
+    image_path = JOB_ROOT / f"{payload.request_id}.image.tmp"
+    try:
+        image_path.write_bytes(image)
+        with job_database() as database:
+            database.execute(
+                "INSERT INTO requests (request_id, fingerprint, status, message) "
+                "VALUES (?, ?, 'planning', 'Gemma is preparing your video request.')",
+                (str(payload.request_id), fingerprint),
+            )
+        task = asyncio.create_task(plan_request(payload, request.app, image_path))
+        request.app.state.tasks.add(task)
+        task.add_done_callback(request.app.state.tasks.discard)
+    except Exception:
+        image_path.unlink(missing_ok=True)
+        lock.release()
+        raise
+    return JSONResponse(request_data(saved_request(payload.request_id)), status_code=202)
+
+
+@app.get("/jobs/{request_id}")
+async def request_status(request_id: UUID):
+    record = saved_request(request_id)
+    if record is None:
+        raise HTTPException(status_code=404, detail="Unknown request.")
+    if record["job_id"] and record["status"] == "running":
+        try:
+            async with mcp_client() as client:
+                result = await client.call_tool("get_video_status", {"job_id": record["job_id"]})
+            if result.is_error:
+                raise RuntimeError("MCP status check failed.")
+            data = tool_data(result)
+            remote = nested_field(data, "status")
+            state = "running" if remote in {"queued", "running"} else remote
+            if state not in {"running", "completed", "failed", "cancelled", "unknown"}:
+                raise RuntimeError("MCP returned an invalid job state.")
+            update_request(request_id, state, nested_field(data, "message") or "Generating.")
+            record = saved_request(request_id)
+        except Exception as exc:
+            logger.warning("Request %s status unavailable (%s).", request_id, type(exc).__name__)
+            raise HTTPException(
+                status_code=503, detail="Video status temporarily unavailable."
+            ) from exc
+    return request_data(record)
+
+
+@app.get("/jobs/{request_id}/video")
+async def request_video(request_id: UUID):
+    record = saved_request(request_id)
+    if record is None or record["status"] != "completed" or not record["job_id"]:
+        raise HTTPException(status_code=404, detail="Video is not ready.")
+    # Always fetch from the configured private MCP service, never an LLM-supplied URL.
+    parsed = urlsplit(MCP_URL)
+    video_url = urlunsplit(
+        (parsed.scheme, parsed.netloc, f"/videos/{UUID(record['job_id'])}.mp4", "", "")
+    )
+    client = httpx.AsyncClient(timeout=120, trust_env=False, follow_redirects=False)
+    try:
+        response = await client.send(client.build_request("GET", video_url), stream=True)
+        response.raise_for_status()
+    except Exception as exc:
+        await client.aclose()
+        raise HTTPException(status_code=503, detail="Video temporarily unavailable.") from exc
+
+    async def close():
+        await response.aclose()
+        await client.aclose()
+
+    return StreamingResponse(
+        response.aiter_bytes(),
+        media_type="video/mp4",
+        background=BackgroundTask(close),
+        headers={"Content-Disposition": f'attachment; filename="{request_id}.mp4"'},
+    )
 
 
 @app.get("/healthz")

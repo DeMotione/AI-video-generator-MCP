@@ -1,0 +1,12 @@
+video.example.com {
+    request_body {
+        max_size 12MB
+    }
+    handle_path /static/* {
+        root * /var/www/aivideo-static
+        file_server
+    }
+    handle {
+        reverse_proxy 127.0.0.1:8000
+    }
+}

@@ -1,6 +1,34 @@
 # AiVideoGenerator
 
-A private Django website for turning an uploaded image and prompt into video through your existing ComfyUI workflow. Run it on your PC at `http://127.0.0.1:8000`.
+A private Django website for turning an uploaded image and prompt into video
+through the Gemma VM agent, MCP and RunPod. Deploy it on the existing Oracle
+VM using [deploy/vm/web/README.md](../deploy/vm/web/README.md). The original
+direct ComfyUI backend remains available with `GENERATION_BACKEND=comfy`.
+
+## Gemma and RunPod connection
+
+The default backend is `GENERATION_BACKEND=agent`. Set `AGENT_URL` (default
+`http://127.0.0.1:8100`) and `AGENT_API_TOKEN` in the repository root `.env`.
+The token must match the VM agent's token. Update the VM's `agent.py` from
+`deploy/vm/agent/agent.py` to provide the durable `/jobs` API, then run website
+migrations and start `runworker`. On the same VM the agent is reachable over
+localhost; for local PC development, forward port 8100 through SSH.
+
+The browser receives a queued job immediately. Gemma prepares the request in
+the background, MCP stores the starting image, and RunPod renders a five-second
+silent video. The worker polls the same request and stores the finished MP4
+privately for playback and authenticated downloads. Uploaded starting frames
+must be landscape ~16:9 (within 2%), at least 320x180, static JPEG/PNG/WebP,
+up to 4096 pixels per side and 10 MiB. Persistent attachments and MCP assets
+remain after the agent's temporary upload file is removed.
+
+Agent requests use durable IDs: lost responses are reconciled and accepted
+jobs resume after worker restarts. Unknown submission outcomes are never
+automatically submitted as replacement jobs. See the deployment guide for
+the VM service files, credentials, HTTPS, and request database backups.
+
+The direct ComfyUI setup and its recovery commands below apply when
+`GENERATION_BACKEND=comfy`.
 
 Included: email/password login, predefined accounts, roles, database-backed sessions, image pasting and drag-and-drop, saved conversations, a persistent job queue, video playback, downloads, and logout. The interface uses Django templates, local CSS, and lightweight JavaScript. No Node.js build or frontend service is needed.
 
@@ -29,7 +57,9 @@ uv run python backend/manage.py runworker
 
 You now have three processes: ComfyUI, the Django website, and the worker. Paste or attach an image in the chat, describe the motion, and click Generate. The website remains usable while the worker renders. A stopped worker leaves jobs queued until it starts again.
 
-This site talks directly to ComfyUI. Your Gemma VM and FastMCP agent are not required for this web flow; your existing MCP project can remain separate. There is no LLM reply generator in this first version: each image/prompt message creates a video job, and the assistant-style reply reports its state and result.
+In direct ComfyUI mode the website bypasses the VM agent. In the default agent
+mode, Gemma chooses the MCP generation tools and the website displays the job
+state and result.
 
 ## Project layout
 
