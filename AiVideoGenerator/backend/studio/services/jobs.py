@@ -6,6 +6,7 @@ from django.utils import timezone
 
 from studio.models import Generation
 
+from .agent import AgentBusy, AgentClient, AgentError, RequestMissing
 from .comfy import ComfyClient, ComfyError, GenerationError, SubmissionUnknown, load_workflow
 from .storage import get_storage
 
@@ -18,6 +19,9 @@ def update(job, **fields):
 
 
 def submit_job(job):
+    if job.backend == "agent":
+        submit_agent_job(job)
+        return
     try:
         workflow = load_workflow()
         storage = get_storage()
@@ -45,6 +49,9 @@ def submit_job(job):
 
 
 def poll_job(job):
+    if job.backend == "agent":
+        poll_agent_job(job)
+        return
     try:
         with ComfyClient() as client:
             history = client.history(job.comfy_id)
@@ -79,9 +86,82 @@ def poll_job(job):
         )
 
 
+def apply_agent_state(job, client, data):
+    fields = {
+        "remote_job_id": data.get("job_id") or "",
+        "message": data.get("message", "")[:500],
+    }
+    state = data["status"]
+    if state == "completed":
+        fields.update(
+            status=Generation.Status.COMPLETED,
+            video_key=client.save_output(job, get_storage()),
+            video_mime="video/mp4",
+        )
+    elif state in {"failed", "cancelled"}:
+        fields["status"] = Generation.Status.FAILED
+    elif state == "unknown":
+        fields["status"] = Generation.Status.UNKNOWN
+    else:
+        fields["status"] = Generation.Status.RUNNING
+    update(job, **fields)
+
+
+def submit_agent_job(job):
+    try:
+        with AgentClient() as client:
+            apply_agent_state(job, client, client.submit(job, get_storage()))
+    except AgentBusy as exc:
+        update(job, status=Generation.Status.QUEUED, message=str(exc))
+    except AgentError as exc:
+        # The response may have been lost after acceptance. Reconcile using
+        # the same request ID; never create a replacement request.
+        update(job, message=str(exc))
+    except Exception:
+        logger.exception("Agent submission interrupted for job %s", job.pk)
+        update(job, message="Checking whether the video agent accepted your request.")
+
+
+def poll_agent_job(job):
+    try:
+        with AgentClient() as client:
+            try:
+                data = client.status(job)
+            except RequestMissing:
+                if job.status != Generation.Status.SUBMITTING:
+                    update(
+                        job,
+                        status=Generation.Status.UNKNOWN,
+                        message="Request record missing. Check the VM before retrying.",
+                    )
+                    return
+                data = client.submit(job, get_storage())
+            apply_agent_state(job, client, data)
+    except AgentBusy as exc:
+        update(job, status=Generation.Status.QUEUED, message=str(exc))
+    except AgentError as exc:
+        update(job, message=str(exc))
+    except Exception:
+        logger.exception("Agent polling failed for job %s", job.pk)
+        update(job, message="Could not retrieve your video yet. The worker will try again.")
+    if (
+        job.submitted_at
+        and (timezone.now() - job.submitted_at).total_seconds()
+        > settings.AGENT_JOB_TIMEOUT_SECONDS
+    ):
+        # Keep accepted jobs recoverable; do not turn a slow render into a resubmission.
+        Generation.objects.filter(
+            pk=job.pk, status__in=[Generation.Status.SUBMITTING, Generation.Status.RUNNING]
+        ).update(
+            message="Your video is taking longer than expected. Checking the same request."
+        )
+
+
 def worker_tick():
     stale = timezone.now() - timedelta(minutes=5)
-    Generation.objects.filter(status=Generation.Status.SUBMITTING, updated_at__lt=stale).update(
+    Generation.objects.filter(
+        backend="comfy", status=Generation.Status.SUBMITTING, updated_at__lt=stale
+    ).update(
         status=Generation.Status.UNKNOWN,
         message="Submission was interrupted. Check ComfyUI before starting another generation.",
         updated_at=timezone.now(),
@@ -90,8 +170,24 @@ def worker_tick():
         "conversation"
     ):
         poll_job(job)
+    for job in Generation.objects.filter(
+        backend="agent", status=Generation.Status.SUBMITTING
+    ).select_related("conversation"):
+        poll_agent_job(job)
     job = Generation.objects.filter(status=Generation.Status.QUEUED).first()
-    if job and Generation.objects.filter(pk=job.pk, status=Generation.Status.QUEUED).update(
-        status=Generation.Status.SUBMITTING, updated_at=timezone.now()
+    if (
+        job
+        and job.backend == "agent"
+        and Generation.objects.filter(
+            backend="agent",
+            status__in=[Generation.Status.SUBMITTING, Generation.Status.RUNNING],
+        ).exists()
     ):
+        return
+    if job and Generation.objects.filter(pk=job.pk, status=Generation.Status.QUEUED).update(
+        status=Generation.Status.SUBMITTING,
+        updated_at=timezone.now(),
+        submitted_at=timezone.now(),
+    ):
+        job.status = Generation.Status.SUBMITTING
         submit_job(job)

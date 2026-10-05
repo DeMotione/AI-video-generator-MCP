@@ -37,6 +37,8 @@ class Generation(models.Model):
     video_mime = models.CharField(max_length=40, default="video/mp4")
     status = models.CharField(max_length=12, choices=Status.choices, default=Status.QUEUED)
     comfy_id = models.CharField(max_length=100, blank=True)
+    backend = models.CharField(max_length=12, default="comfy")
+    remote_job_id = models.CharField(max_length=100, blank=True)
     message = models.CharField(max_length=500, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)

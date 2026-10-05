@@ -1,5 +1,10 @@
 # Oracle VM: MCP server and agent
 
+The web app can now run on this same VM. Its queue worker uses the agent's
+durable `/jobs` API and retrieves finished videos through authenticated agent
+downloads. Deployment instructions and web/worker systemd units are in
+[web/README.md](web/README.md). `/chat` remains available for existing clients.
+
 The always-on VM (Ubuntu 24.04, ARM64, reachable over Tailscale) runs three
 systemd services. Nothing on it needs a GPU; video generation happens on the
 RunPod endpoint described in [../runpod/README.md](../runpod/README.md).

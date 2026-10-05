@@ -18,6 +18,9 @@ oracle = [
     { name = "oci" },
     { name = "oracledb" },
 ]
+production = [
+    { name = "gunicorn", marker = "sys_platform != 'win32'" },
+]
 
 [package.dev-dependencies]
 dev = [
@@ -27,13 +30,14 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "django", specifier = ">=5.2,<5.3" },
+    { name = "gunicorn", marker = "sys_platform != 'win32' and extra == 'production'", specifier = ">=23,<24" },
     { name = "httpx", specifier = ">=0.28,<0.29" },
     { name = "oci", marker = "extra == 'oracle'", specifier = ">=2,<3" },
     { name = "oracledb", marker = "extra == 'oracle'", specifier = ">=3,<5" },
     { name = "pillow", specifier = ">=11,<13" },
     { name = "python-dotenv", specifier = ">=1,<2" },
 ]
-provides-extras = ["oracle"]
+provides-extras = ["oracle", "production"]
 
 [package.metadata.requires-dev]
 dev = [{ name = "ruff", specifier = ">=0.8" }]
@@ -477,6 +481,18 @@ wheels = [
 ]
 
 [[package]]
+name = "gunicorn"
+version = "23.0.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "packaging" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/34/72/9614c465dc206155d93eff0ca20d42e1e35afc533971379482de953521a4/gunicorn-23.0.0.tar.gz", hash = "sha256:f014447a0101dc57e294f6c18ca6b40227a4c90e9bdb586042628030cba004ec", size = 375031, upload-time = "2024-08-10T20:25:27.378Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/cb/7d/6dac2a6e1eba33ee43f318edbed4ff29151a49b5d37f080aad1e6469bca4/gunicorn-23.0.0-py3-none-any.whl", hash = "sha256:ec400d38950de4dfd418cff8328b2c8faed0edb0d517d3394e457c317908ca4d", size = 85029, upload-time = "2024-08-10T20:25:24.996Z" },
+]
+
+[[package]]
 name = "h11"
 version = "0.16.0"
 source = { registry = "https://pypi.org/simple" }
@@ -672,6 +688,15 @@ wheels = [
     { url = "https://files.pythonhosted.org/packages/2e/c5/6d15fedcbd67fabd6c9c345554e184ba6617e389bfea348358f8aacc0e5f/oracledb-4.0.2-cp314-cp314-win32.whl", hash = "sha256:b14d52c09b3c7a8273b3640ba06675acec5000dab0356ef288587c46c30bbbb4", size = 1514946, upload-time = "2026-07-14T17:23:33.981Z" },
     { url = "https://files.pythonhosted.org/packages/2d/b9/d6e2c3ee3d9fb3585f04910ecf6ff91dbfd84e8dafc06084717f6a134bca/oracledb-4.0.2-cp314-cp314-win_amd64.whl", hash = "sha256:5c1f13ba535d9f0fc61e1987720988612cf9424667d491fc344ba681f3336a17", size = 1915171, upload-time = "2026-07-14T17:23:35.574Z" },
     { url = "https://files.pythonhosted.org/packages/0d/6b/47f5c76223798ebfb5b6d41e9c3a451d296d6d90123584d85159e4236ff5/oracledb-4.0.2-cp314-cp314-win_arm64.whl", hash = "sha256:93b4d2cd17a93224711fadd28f77e956e5c6575cd923f24bfe0b1a2a581beb79", size = 1574652, upload-time = "2026-07-14T17:23:36.982Z" },
+]
+
+[[package]]
+name = "packaging"
+version = "26.3"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/7d/fa/3944b40b07da9ce895c0e6303a5ab7d53da063554f534556b134a54d6093/packaging-26.3.tar.gz", hash = "sha256:94edc256424af38762eb31306eed28beb9f0efc50a8837492c9d6fd6004aed79", size = 313412, upload-time = "2026-08-04T18:15:28.737Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/63/34/ba1c580383c9eada3711951fef0795c80b829a078d72188184bcab9dd527/packaging-26.3-py3-none-any.whl", hash = "sha256:d7193f7c8e4e93f444fde0262bf90af30e16fa0ad0ad44cb553c87339b23cd1c", size = 129956, upload-time = "2026-08-04T18:15:27.159Z" },
 ]
 
 [[package]]
