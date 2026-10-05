@@ -49,7 +49,8 @@ class GenerationPlan(Contract):
 class VideoEstimate(Contract):
     currency: Literal["USD"] = "USD"
     estimated_cost: float = 0.54
-    generated_seconds: Literal[6] = 6
+    # The LTX API bills a 6-second minimum; self-hosted renders exactly 5 s.
+    generated_seconds: Literal[5, 6] = 6
     delivered_seconds: Literal[5] = 5
     basis: str = "LTX direct API, 720p; excludes taxes."
 
@@ -59,6 +60,7 @@ class JobStatus(StrEnum):
     RUNNING = "running"
     COMPLETED = "completed"
     FAILED = "failed"
+    CANCELLED = "cancelled"
     UNKNOWN = "unknown"
 
 
@@ -67,6 +69,7 @@ class VideoJob(Contract):
     plan: GenerationPlan
     status: JobStatus
     comfy_id: str | None = None
+    provider_job_id: str | None = None
     progress: int | None = Field(default=None, ge=0, le=100)
     message: str = ""
     created_at: datetime = Field(

@@ -1,6 +1,8 @@
 import hashlib
 import io
 import os
+import shutil
+from datetime import UTC, datetime
 from pathlib import Path
 from uuid import UUID, uuid4
 
@@ -19,6 +21,9 @@ from video_mcp.models import (
 
 PRESET = "ltx25-fast-5s-16x9-v1"
 MAX_IMAGE_BYTES = 10 * 1024 * 1024
+# How far an image's aspect ratio may stray from 16:9 before it is rejected
+# rather than center-cropped.
+ASPECT_TOLERANCE = 0.02
 
 
 class VideoServiceError(Exception):
@@ -35,6 +40,19 @@ class ComfyBackend:
 
         for folder in ("incoming", "assets", "jobs", "outputs"):
             (self.root / folder).mkdir(parents=True, exist_ok=True)
+
+    def describe(self) -> dict:
+        return {
+            "model": "ltx-2-5-fast",
+            "duration": 5,
+            "aspect_ratio": "16:9",
+            "resolution": "1280x720",
+            "audio": "silent",
+            "generated_seconds": 6,
+            "estimated_usd": 0.54,
+            "backend": "comfyui",
+            "notice": "Generates through the configured ComfyUI backend.",
+        }
 
     def _write(self, path: Path, content: bytes):
         temporary = path.with_name(f"{path.name}.{uuid4().hex}.tmp")
@@ -91,6 +109,12 @@ class ComfyBackend:
         with path.open("rb") as source:
             raw = source.read(MAX_IMAGE_BYTES + 1)
 
+        return self.register_image_bytes(raw)
+
+    def register_image_bytes(self, raw: bytes) -> ImageAsset:
+        if not raw:
+            raise VideoServiceError("Image is empty.")
+
         if len(raw) > MAX_IMAGE_BYTES:
             raise VideoServiceError("Image exceeds 10 MiB.")
 
@@ -108,12 +132,20 @@ class ComfyBackend:
 
                 if width < 320 or height < 180:
                     raise ValueError("Minimum image size is 320×180.")
-                if width * 9 != height * 16:
+                if abs(width * 9 - height * 16) > height * 16 * ASPECT_TOLERANCE:
                     raise ValueError("This preset requires a 16:9 image.")
 
                 rgba = frame.convert("RGBA")
                 rgb = Image.new("RGB", rgba.size, "white")
                 rgb.paste(rgba, mask=rgba.getchannel("A"))
+
+                # A near-16:9 image such as 1672x941 can never be exact, so
+                # trim the surplus pixel rows/columns evenly from both sides.
+                crop_width = min(width, round(height * 16 / 9))
+                crop_height = min(height, round(width * 9 / 16))
+                left = (width - crop_width) // 2
+                top = (height - crop_height) // 2
+                rgb = rgb.crop((left, top, left + crop_width, top + crop_height))
 
                 normalized = io.BytesIO()
                 rgb.resize(
@@ -237,11 +269,18 @@ class ComfyBackend:
         self._save("jobs", job.job_id, job)
         return job
 
+    def cancel(self, job_id: UUID) -> VideoJob:
+        self._load("jobs", job_id, VideoJob)
+        raise VideoServiceError(
+            "This backend cannot cancel jobs. Inspect ComfyUI instead."
+        )
+
     def status(self, job_id: UUID) -> VideoJob:
         job = self._load("jobs", job_id, VideoJob)
         if job.status in {
             JobStatus.COMPLETED,
             JobStatus.FAILED,
+            JobStatus.CANCELLED,
             JobStatus.UNKNOWN,
         }:
             return job
@@ -342,3 +381,96 @@ class ComfyBackend:
                 if self.public_url else None
             ),
         )
+
+class DemoBackend(ComfyBackend):
+    """Serves a prepared video instead of generating one.
+
+    Lets the agent and tool surface be exercised end to end without a GPU,
+    a ComfyUI instance or any billable generation. Every response says
+    plainly that the video is not derived from the submitted image.
+    """
+
+    def __init__(self, root: Path | None = None):
+        super().__init__(root)
+        configured = os.getenv(
+            "AI_VIDEO_DEMO_FILE", "data/demo/prepared-demo.mp4"
+        )
+        path = Path(configured)
+        self.demo_file = (
+            path if path.is_absolute() else self.root.parent / path
+        )
+        self.demo_delay = max(
+            0, float(os.getenv("AI_VIDEO_DEMO_DELAY_SECONDS", "2"))
+        )
+
+    def describe(self) -> dict:
+        return super().describe() | {
+            "estimated_usd": 0.0,
+            "backend": "prepared-demo",
+            "notice": (
+                "Returns a prepared demonstration, not a video generated "
+                "from the image."
+            ),
+        }
+
+    def _validate_demo_file(self):
+        if not self.demo_file.is_file():
+            raise VideoServiceError(
+                f"Prepared demo video is missing: {self.demo_file}"
+            )
+        with self.demo_file.open("rb") as source:
+            header = source.read(64)
+        if b"ftyp" not in header:
+            raise VideoServiceError(
+                "Prepared demo video is not a valid MP4 file."
+            )
+
+    def estimate(self, plan: GenerationPlan) -> VideoEstimate:
+        self.validate_plan(plan)
+        self._validate_demo_file()
+        return VideoEstimate(
+            estimated_cost=0,
+            basis="Prepared demonstration video; no generation or billing.",
+        )
+
+    def create(self, plan: GenerationPlan) -> VideoJob:
+        plan, _, _ = self.validate_plan(plan)
+        self._validate_demo_file()
+        job = VideoJob(
+            job_id=uuid4(),
+            plan=plan,
+            status=JobStatus.QUEUED,
+            progress=0,
+            message=(
+                "Prepared demonstration queued. This video is not generated "
+                "from the uploaded image."
+            ),
+        )
+        destination = self.root / "outputs" / f"{job.job_id}.mp4"
+        temporary = destination.with_name(
+            f"{destination.name}.{uuid4().hex}.tmp"
+        )
+        shutil.copyfile(self.demo_file, temporary)
+        temporary.replace(destination)
+        self._save("jobs", job.job_id, job)
+        return job
+
+    def status(self, job_id: UUID) -> VideoJob:
+        job = self._load("jobs", job_id, VideoJob)
+        if job.status != JobStatus.QUEUED:
+            return job
+
+        now = datetime.now(UTC)
+        if (now - job.created_at).total_seconds() < self.demo_delay:
+            return job
+
+        job = job.model_copy(update={
+            "status": JobStatus.COMPLETED,
+            "progress": 100,
+            "message": (
+                "Prepared demonstration ready. This video was not generated "
+                "from the uploaded image."
+            ),
+        })
+        self._save("jobs", job.job_id, job)
+        return job

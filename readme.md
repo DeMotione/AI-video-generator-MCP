@@ -648,22 +648,48 @@ The current focus is:
 * [x] Test gpt-oss-20B
 * [x] Compare tool-calling performance
 * [ ] Select initial LLM
-* [ ] Select video-generation backend
-* [ ] Connect real video generation
+* [x] Select video-generation backend: LTX-2.5 on RunPod serverless
+* [x] Connect real video generation
+
+## Real video generation (RunPod)
+
+The MCP server runs on the Oracle VM with `VIDEO_BACKEND=runpod`. It sends a
+fixed LTX-2.5 ComfyUI workflow and the image to a RunPod serverless endpoint
+that scales to zero, and saves the returned MP4. Setup and cost details:
+[deploy/runpod/README.md](deploy/runpod/README.md) and
+[deploy/vm/README.md](deploy/vm/README.md).
+
+Make a video from the PC (uploads the image, waits, downloads the MP4 to
+`data/outputs/`; needs `VM_HOST` and `VM_SSH_KEY` in `.env`):
+
+```bash
+uv run python scripts/generate_video.py data/incoming/photo.png "The character walks along the path. The camera tracks backward."
+uv run python scripts/generate_video.py data/incoming/photo.png "..." --agent   # through Gemma
+```
+
+First measured job, 3 October 2026 (`photo.png`, cold worker):
+
+| | |
+| --- | --- |
+| Output | 1024x576, 24 fps, 121 frames (5.04 s), H.264, silent, 1.8 MB |
+| RunPod | 33 s waiting for the worker + 73 s rendering = 106 s billed |
+| Cost | $0.037 (48 GB A40/A6000 tier), versus $0.54 per clip on the LTX API |
+| Gemma 3 12B planning on the VM CPU | 7 min 48 s before `create_video` (not billed by RunPod) |
 
 ## Implemented tools
 
 | Tool | Returns | Errors |
 | --- | --- | --- |
-| `create_video(prompt, duration=5, aspect_ratio="16:9")` | queued job with `job_id` | invalid prompt, duration outside 1-60, unsupported aspect ratio |
-| `get_video_status(job_id)` | job status and progress | unknown `job_id` |
-| `get_video_result(job_id)` | video path for a completed job | unknown `job_id`, job not completed yet |
-| `cancel_video(job_id)` | cancelled job | unknown `job_id`, job already finished |
+| `list_video_models()` | the active backend's single preset | — |
+| `register_image(filename)` / `register_image_base64(image_base64)` | asset normalized to a 1280x720 JPEG | not ~16:9 (within 2% is center-cropped), too small or large, not an image |
+| `estimate_video_cost(plan)` | estimate, without dispatching | invalid plan or unknown asset |
+| `create_video(plan)` | queued job with `job_id` | invalid plan, another job active, daily limit reached |
+| `get_video_status(job_id)` | queued, running, completed, failed, cancelled or unknown | unknown `job_id` |
+| `get_video_result(job_id)` | video path and download URL for a completed job | unknown `job_id`, job not completed yet |
+| `cancel_video(job_id)` | cancelled job | unknown `job_id`, job already finished, backend cannot cancel |
 
-Generation itself is still mocked: no file is written and `video_path` is a
-placeholder. What is real is the job lifecycle — `queued` → `running` →
-`completed`, with `cancelled` as a sticky terminal state — so the workflow and
-the error paths can be evaluated before a backend exists.
+`VIDEO_BACKEND` selects `runpod`, `comfy` (desktop ComfyUI with the paid LTX
+API node) or `demo` (a prepared video, clearly labelled as not generated).
 
 ## LLM evaluation results
 

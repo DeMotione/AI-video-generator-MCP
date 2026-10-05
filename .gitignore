@@ -72,6 +72,11 @@ videos/
 *.avi
 *.mkv
 
+# Runtime data written by the MCP server (data/incoming is kept)
+data/assets/
+data/jobs/
+data/runpod/
+
 # ==============================
 # Logs
 # ==============================

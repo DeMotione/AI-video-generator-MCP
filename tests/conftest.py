@@ -213,10 +213,12 @@ def expected_tools():
     return {
         "list_video_models",
         "register_image",
+        "register_image_base64",
         "estimate_video_cost",
         "create_video",
         "get_video_status",
         "get_video_result",
+        "cancel_video",
     }
 
 
