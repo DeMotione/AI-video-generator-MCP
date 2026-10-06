@@ -1,11 +1,11 @@
 # AiVideoGenerator
 
 A private Django website for turning an uploaded image and prompt into video
-through the Gemma VM agent, MCP and RunPod. Deploy it on the existing Oracle
+through the OpenRouter VM agent, MCP and RunPod. Deploy it on the existing Oracle
 VM using [deploy/vm/web/README.md](../deploy/vm/web/README.md). The original
 direct ComfyUI backend remains available with `GENERATION_BACKEND=comfy`.
 
-## Gemma and RunPod connection
+## OpenRouter and RunPod connection
 
 The default backend is `GENERATION_BACKEND=agent`. Set `AGENT_URL` (default
 `http://127.0.0.1:8100`) and `AGENT_API_TOKEN` in the repository root `.env`.
@@ -14,7 +14,7 @@ The token must match the VM agent's token. Update the VM's `agent.py` from
 migrations and start `runworker`. On the same VM the agent is reachable over
 localhost; for local PC development, forward port 8100 through SSH.
 
-The browser receives a queued job immediately. Gemma prepares the request in
+The browser receives a queued job immediately. OpenRouter prepares the request in
 the background, MCP stores the starting image, and RunPod renders a five-second
 silent video. The worker polls the same request and stores the finished MP4
 privately for playback and authenticated downloads. Uploaded starting frames
@@ -58,8 +58,21 @@ uv run python backend/manage.py runworker
 You now have three processes: ComfyUI, the Django website, and the worker. Paste or attach an image in the chat, describe the motion, and click Generate. The website remains usable while the worker renders. A stopped worker leaves jobs queued until it starts again.
 
 In direct ComfyUI mode the website bypasses the VM agent. In the default agent
-mode, Gemma chooses the MCP generation tools and the website displays the job
+mode, OpenRouter chooses the MCP generation tools and the website displays the job
 state and result.
+
+For a website running on your PC, keep an SSH forward from local port 8100 to
+the VM agent running while the queue worker runs:
+
+```bash
+ssh -N -o ExitOnForwardFailure=yes -L 8100:127.0.0.1:8100 -i /path/to/ssh-key.key ubuntu@<vm-tailscale-ip>
+```
+
+In a second terminal, `curl http://127.0.0.1:8100/healthz` must return
+`{"status":"running"}` before submitting a video. If the website and worker
+run on the VM instead, both can reach the agent on VM localhost without this
+forward. The OpenRouter key belongs in the VM agent's configuration; see
+[deploy/vm/openrouter.md](../deploy/vm/openrouter.md).
 
 ## Project layout
 
