@@ -191,7 +191,11 @@ class StudioTests(TestCase):
 
     def test_private_media_does_not_survive_logout(self):
         job = self.submit().json()
-        self.assertEqual(self.client.get(job["image_url"]).status_code, 200)
+        response = self.client.get(job["image_url"])
+        try:
+            self.assertEqual(response.status_code, 200)
+        finally:
+            response.close()
         self.client.logout()
         self.assertEqual(self.client.get(job["image_url"]).status_code, 401)
 

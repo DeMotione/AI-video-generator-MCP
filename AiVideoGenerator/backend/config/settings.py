@@ -2,27 +2,36 @@ import os
 from pathlib import Path
 
 from django.core.exceptions import ImproperlyConfigured
-from dotenv import load_dotenv
+
+from .environment import load_configuration
 
 BASE_DIR = Path(__file__).resolve().parents[2]
 REPOSITORY_ROOT = BASE_DIR.parent
-load_dotenv(REPOSITORY_ROOT / ".env")
+APP_ENV, ENVIRONMENT = load_configuration(REPOSITORY_ROOT)
+PRODUCTION = APP_ENV == "production"
 
 
 def env_bool(name, default=False):
-    return os.getenv(name, str(default)).lower() in {"true", "1", "yes"}
+    value = os.getenv(name, str(default)).strip().lower()
+    if value not in {"true", "1", "yes", "false", "0", "no"}:
+        raise ImproperlyConfigured(f"{name} must be true or false.")
+    return value in {"true", "1", "yes"}
 
 
 def env_list(name, default=""):
     return [item.strip() for item in os.getenv(name, default).split(",") if item.strip()]
 
 
-DEBUG = env_bool("DJANGO_DEBUG", True)
+DEBUG = env_bool("DJANGO_DEBUG", not PRODUCTION)
+if PRODUCTION and DEBUG:
+    raise ImproperlyConfigured("DJANGO_DEBUG must be false in production.")
 SECRET_KEY = os.getenv("DJANGO_SECRET_KEY", "local-development-only-replace-before-deployment")
 if not DEBUG and (len(SECRET_KEY) < 50 or SECRET_KEY.startswith("local-development")):
     raise ImproperlyConfigured("Set a unique DJANGO_SECRET_KEY of at least 50 characters.")
 ALLOWED_HOSTS = env_list("DJANGO_ALLOWED_HOSTS", "localhost,127.0.0.1,[::1]")
 CSRF_TRUSTED_ORIGINS = env_list("DJANGO_CSRF_TRUSTED_ORIGINS")
+if PRODUCTION and (not os.getenv("DJANGO_ALLOWED_HOSTS") or "*" in ALLOWED_HOSTS):
+    raise ImproperlyConfigured("Set explicit DJANGO_ALLOWED_HOSTS in production.")
 INSTALLED_APPS = [
     "django.contrib.admin",
     "django.contrib.auth",
@@ -58,8 +67,13 @@ TEMPLATES = [
     }
 ]
 WSGI_APPLICATION = "config.wsgi.application"
-RUNTIME_ROOT = BASE_DIR / ".runtime"
-RUNTIME_ROOT.mkdir(exist_ok=True)
+RUNTIME_ROOT = Path(os.getenv("DJANGO_RUNTIME_ROOT", str(BASE_DIR / ".runtime")))
+if PRODUCTION and (not os.getenv("DJANGO_RUNTIME_ROOT") or not RUNTIME_ROOT.is_absolute()):
+    raise ImproperlyConfigured("Set DJANGO_RUNTIME_ROOT to an absolute persistent VM path.")
+if not RUNTIME_ROOT.is_absolute():
+    RUNTIME_ROOT = BASE_DIR / RUNTIME_ROOT
+RUNTIME_ROOT = RUNTIME_ROOT.resolve()
+RUNTIME_ROOT.mkdir(parents=True, exist_ok=True)
 DB_BACKEND = os.getenv("DB_BACKEND", "sqlite")
 if DB_BACKEND == "oracle":
     required = ["ORACLE_DB_DSN", "ORACLE_DB_USER", "ORACLE_DB_PASSWORD"]
@@ -110,9 +124,24 @@ SESSION_COOKIE_AGE = 60 * 60 * 12
 SESSION_EXPIRE_AT_BROWSER_CLOSE = True
 SESSION_COOKIE_HTTPONLY = True
 SESSION_COOKIE_SAMESITE = "Lax"
-SESSION_COOKIE_SECURE = not DEBUG
-CSRF_COOKIE_SECURE = not DEBUG
-SECURE_SSL_REDIRECT = not DEBUG
+HTTPS_ENABLED = env_bool("DJANGO_HTTPS_ENABLED", not DEBUG)
+SESSION_COOKIE_SECURE = HTTPS_ENABLED
+CSRF_COOKIE_SECURE = HTTPS_ENABLED
+SECURE_SSL_REDIRECT = HTTPS_ENABLED
+SECURE_PROXY_SSL_HEADER = ("HTTP_X_FORWARDED_PROTO", "https") if PRODUCTION else None
+SECURE_REDIRECT_EXEMPT = [r"^healthz/$", r"^readyz/$"]
+SECURE_HSTS_SECONDS = 31536000 if PRODUCTION and HTTPS_ENABLED else 0
+SECURE_HSTS_INCLUDE_SUBDOMAINS = False
+SECURE_HSTS_PRELOAD = False
+# Deploying one host does not authorize permanent HSTS for unrelated subdomains
+# or browser preload enrollment. Keep all other deployment checks enforced.
+SILENCED_SYSTEM_CHECKS = ["security.W005", "security.W021"] if PRODUCTION else []
+if PRODUCTION and HTTPS_ENABLED and not CSRF_TRUSTED_ORIGINS:
+    raise ImproperlyConfigured("Set HTTPS DJANGO_CSRF_TRUSTED_ORIGINS in production.")
+if PRODUCTION and HTTPS_ENABLED and any(
+    not origin.startswith("https://") for origin in CSRF_TRUSTED_ORIGINS
+):
+    raise ImproperlyConfigured("Production CSRF origins must use HTTPS.")
 SECURE_CONTENT_TYPE_NOSNIFF = True
 X_FRAME_OPTIONS = "DENY"
 LANGUAGE_CODE = "en-us"
@@ -122,6 +151,13 @@ USE_TZ = True
 STATIC_URL = "/static/"
 STATICFILES_DIRS = [BASE_DIR / "frontend" / "static"]
 STATIC_ROOT = BASE_DIR / "staticfiles"
+if PRODUCTION:
+    STORAGES = {
+        "default": {"BACKEND": "django.core.files.storage.FileSystemStorage"},
+        "staticfiles": {
+            "BACKEND": "django.contrib.staticfiles.storage.ManifestStaticFilesStorage"
+        },
+    }
 DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
 DATA_UPLOAD_MAX_MEMORY_SIZE = 12 * 1024 * 1024
 FILE_UPLOAD_MAX_MEMORY_SIZE = 2 * 1024 * 1024
@@ -136,6 +172,8 @@ if GENERATION_BACKEND not in {"agent", "comfy"}:
 AGENT_URL = os.getenv("AGENT_URL", "http://127.0.0.1:8100").rstrip("/")
 AGENT_API_TOKEN = os.getenv("AGENT_API_TOKEN", "")
 AGENT_JOB_TIMEOUT_SECONDS = int(os.getenv("AGENT_JOB_TIMEOUT_SECONDS", "3600"))
+if PRODUCTION and GENERATION_BACKEND == "agent" and len(AGENT_API_TOKEN) < 32:
+    raise ImproperlyConfigured("Set the VM's AGENT_API_TOKEN for the web worker.")
 COMFY_URL = os.getenv("COMFY_URL", "http://127.0.0.1:8188").rstrip("/")
 COMFY_WORKFLOW_PATH = BASE_DIR / os.getenv("COMFY_WORKFLOW_PATH", "workflows/local.json")
 COMFY_IMAGE_NODE_ID = os.getenv("COMFY_IMAGE_NODE_ID", "")
@@ -148,3 +186,11 @@ COMFY_POLL_SECONDS = max(1, int(os.getenv("COMFY_POLL_SECONDS", "3")))
 COMFY_JOB_TIMEOUT_SECONDS = int(os.getenv("COMFY_JOB_TIMEOUT_SECONDS", "1800"))
 MAX_IMAGE_BYTES = int(os.getenv("MAX_IMAGE_MB", "10")) * 1024 * 1024
 MAX_VIDEO_BYTES = int(os.getenv("MAX_VIDEO_MB", "512")) * 1024 * 1024
+RELEASE_SHA = os.getenv("RELEASE_SHA", "development")
+WORKER_HEARTBEAT = RUNTIME_ROOT / "worker-heartbeat.json"
+LOGGING = {
+    "version": 1,
+    "disable_existing_loggers": False,
+    "handlers": {"console": {"class": "logging.StreamHandler"}},
+    "root": {"handlers": ["console"], "level": "INFO"},
+}

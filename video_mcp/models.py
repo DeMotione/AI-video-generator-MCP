@@ -1,10 +1,9 @@
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from enum import StrEnum
 from typing import Annotated, Literal
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, StringConstraints, field_validator
-
 
 Prompt = Annotated[
     str,
@@ -73,7 +72,7 @@ class VideoJob(Contract):
     progress: int | None = Field(default=None, ge=0, le=100)
     message: str = ""
     created_at: datetime = Field(
-        default_factory=lambda: datetime.now(timezone.utc)
+        default_factory=lambda: datetime.now(UTC)
     )
 
 
