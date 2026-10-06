@@ -53,12 +53,36 @@ class AgentClient:
             if response.status_code == 429:
                 raise AgentBusy("The video agent is busy. Your request is waiting.")
             if response.status_code == 404:
-                raise RequestMissing("The agent has no record of this request.")
+                if method == "GET":
+                    raise RequestMissing("The agent has no record of this request.")
+                raise AgentError(
+                    "The VM agent has no /jobs endpoint. Deploy the current agent.py on the VM."
+                )
+            if response.status_code in {401, 403}:
+                raise AgentError(
+                    "The VM agent rejected AGENT_API_TOKEN. Check that the web app "
+                    "and VM use the same token."
+                )
             response.raise_for_status()
             return response
+        except httpx.ConnectError as exc:
+            raise AgentError(
+                "Cannot connect to the VM agent. Check AGENT_URL, the SSH tunnel, "
+                "and aivideo-agent on the VM."
+            ) from exc
+        except httpx.ConnectTimeout as exc:
+            raise AgentError(
+                "Connection to the VM agent timed out. Check AGENT_URL and the SSH tunnel."
+            ) from exc
+        except httpx.HTTPStatusError as exc:
+            raise AgentError(
+                f"The VM agent returned HTTP {exc.response.status_code}. "
+                "Check aivideo-agent logs on the VM."
+            ) from exc
         except httpx.HTTPError as exc:
             raise AgentError(
-                "The video agent is unavailable. Reconnecting to your request."
+                "The VM agent request failed. Check the connection and agent logs; "
+                "the worker will reconcile this request."
             ) from exc
 
     def state(self, response, job):

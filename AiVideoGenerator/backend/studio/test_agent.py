@@ -138,6 +138,26 @@ class AgentTests(TestCase):
         worker_tick()
         self.assertEqual(Generation.objects.get().status, "queued")
 
+    def test_missing_agent_connection_shows_tunnel_hint(self):
+        self.submit()
+
+        def handler(request):
+            raise httpx.ConnectError("Connection refused", request=request)
+
+        self.use_agent(handler)
+        worker_tick()
+        job = Generation.objects.get()
+        self.assertEqual(job.status, "submitting")
+        self.assertIn("SSH tunnel", job.message)
+
+    def test_old_vm_agent_shows_deployment_hint(self):
+        self.submit()
+        self.use_agent(lambda request: httpx.Response(404))
+        worker_tick()
+        job = Generation.objects.get()
+        self.assertEqual(job.status, "submitting")
+        self.assertIn("Deploy the current agent.py", job.message)
+
     def test_accepted_request_is_not_resubmitted_if_vm_record_is_missing(self):
         self.submit()
         Generation.objects.update(status="running")

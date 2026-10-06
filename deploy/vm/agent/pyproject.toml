@@ -1,7 +1,7 @@
 [project]
 name = "aivideo-vm-agent"
 version = "0.1.0"
-description = "Private HTTP bridge between Django, Ollama and remote MCP tools"
+description = "Private HTTP bridge between Django, OpenRouter and remote MCP tools"
 requires-python = ">=3.12,<3.15"
 dependencies = [
     "fastmcp==4.0.3",
