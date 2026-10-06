@@ -2,7 +2,7 @@
 Description=AI Video Generator Agent API
 Wants=network-online.target
 Requires=aivideo-mcp.service
-After=network-online.target ollama.service aivideo-mcp.service
+After=network-online.target aivideo-mcp.service
 StartLimitIntervalSec=60
 StartLimitBurst=5
 
