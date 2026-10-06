@@ -3,6 +3,7 @@
 import asyncio
 import base64
 import io
+import json
 import tempfile
 import unittest
 from contextlib import asynccontextmanager
@@ -26,6 +27,7 @@ class JobApiTests(unittest.TestCase):
         patches = [
             patch.object(agent, "JOB_ROOT", self.root),
             patch.object(agent, "API_TOKEN", "a" * 40),
+            patch.object(agent, "OPENROUTER_API_KEY", "test-openrouter-key"),
         ]
         for item in patches:
             item.start()
@@ -84,7 +86,7 @@ class JobApiTests(unittest.TestCase):
             )
             self.assertIsNone(agent.saved_request(self.payload["request_id"]))
 
-    def test_duplicate_submission_runs_gemma_once_and_cleans_temp_image(self):
+    def test_duplicate_submission_runs_planner_once_and_cleans_temp_image(self):
         with patch.object(agent, "process_question", side_effect=self.decide) as decide:
             with self.client() as client:
                 first = client.post("/jobs", json=self.payload, headers=self.headers)
@@ -165,7 +167,7 @@ class JobApiTests(unittest.TestCase):
                 self.assertEqual(response.headers["Content-Type"], "video/mp4")
         self.assertEqual(len(outgoing), 1)
 
-    def test_gemma_submission_is_recorded_before_create_and_returns_without_polling(self):
+    def test_planner_submission_is_recorded_before_create_and_returns_without_polling(self):
         events = []
         asset_id = str(uuid4())
         payload = agent.ChatRequest.model_validate(self.payload)
@@ -193,7 +195,7 @@ class JobApiTests(unittest.TestCase):
             arguments={"plan": {"asset_id": asset_id, "prompt": self.payload["prompt"]}},
         )
         with (
-            patch.object(agent, "ask_gemma", AsyncMock(return_value=decision)),
+            patch.object(agent, "ask_model", AsyncMock(return_value=decision)),
             patch.object(agent, "follow_job", AsyncMock()) as follow,
         ):
             result = asyncio.run(
@@ -209,6 +211,133 @@ class JobApiTests(unittest.TestCase):
             follow.assert_not_called()
         self.assertEqual(events, ["submitting", self.remote_id])
         self.assertEqual(result["status"], "pending")
+
+    def test_invalid_model_responses_stop_without_calling_mcp(self):
+        tools = [
+            SimpleNamespace(
+                name="create_video", description="Generate", input_schema={"type": "object"}
+            )
+        ]
+        call = AsyncMock()
+        with patch.object(agent, "ask_model", AsyncMock(side_effect=ValueError("invalid"))) as ask:
+            result = asyncio.run(
+                agent.process_question(
+                    SimpleNamespace(call_tool=call),
+                    tools,
+                    agent.ChatRequest(prompt="Generate a video"),
+                    None,
+                )
+            )
+        self.assertEqual(ask.call_count, 2)
+        call.assert_not_called()
+        self.assertIn("invalid or truncated", result["answer"])
+
+    def test_invalid_arguments_are_repaired_using_native_tool_result(self):
+        tools = [
+            SimpleNamespace(
+                name="inspect",
+                description="Inspect",
+                input_schema={
+                    "type": "object",
+                    "required": ["id"],
+                    "properties": {"id": {"type": "string"}},
+                },
+            )
+        ]
+        turn = 0
+
+        async def ask(client, messages, catalog):
+            nonlocal turn
+            turn += 1
+            if turn == 1:
+                return agent.Decision(
+                    action="tool", tool_name="inspect", arguments={}, tool_call_id="call_bad"
+                )
+            self.assertEqual(messages[-1]["role"], "tool")
+            self.assertEqual(messages[-1]["tool_call_id"], "call_bad")
+            self.assertIn("Invalid arguments", messages[-1]["content"])
+            return agent.Decision(action="answer", answer="Please provide an ID.")
+
+        call = AsyncMock()
+        with patch.object(agent, "ask_model", side_effect=ask):
+            result = asyncio.run(
+                agent.process_question(
+                    SimpleNamespace(call_tool=call),
+                    tools,
+                    agent.ChatRequest(prompt="Inspect"),
+                    None,
+                )
+            )
+        call.assert_not_called()
+        self.assertEqual(result["answer"], "Please provide an ID.")
+
+    def test_openrouter_decision_uses_native_tool_calls(self):
+        requests = []
+
+        def handler(request):
+            requests.append(request)
+            return httpx.Response(
+                200,
+                json={
+                    "choices": [
+                        {
+                            "message": {
+                                "role": "assistant",
+                                "content": None,
+                                "reasoning_details": [{"type": "reasoning.text", "text": "Plan"}],
+                                "tool_calls": [
+                                    {
+                                        "id": "call_1",
+                                        "type": "function",
+                                        "function": {
+                                            "name": "create_video",
+                                            "arguments": '{"plan":{"prompt":"Move"}}',
+                                        },
+                                    }
+                                ],
+                            }
+                        }
+                    ]
+                },
+            )
+
+        async def run():
+            async with httpx.AsyncClient(
+                base_url=agent.OPENROUTER_URL,
+                headers={"Authorization": "Bearer test-openrouter-key"},
+                transport=httpx.MockTransport(handler),
+            ) as client:
+                return await agent.ask_model(
+                    client,
+                    [{"role": "user", "content": "Hello"}],
+                    [
+                        {
+                            "name": "create_video",
+                            "description": "Generate",
+                            "input_schema": {
+                                "type": "object",
+                                "properties": {"plan": {"type": "object"}},
+                            },
+                        }
+                    ],
+                )
+
+        decision = asyncio.run(run())
+        self.assertEqual(decision.tool_name, "create_video")
+        self.assertEqual(decision.arguments, {"plan": {"prompt": "Move"}})
+        messages = []
+        agent.record_tool_reply(messages, decision, {"job_id": "job"})
+        self.assertEqual(messages[0]["reasoning_details"][0]["text"], "Plan")
+        self.assertEqual(messages[1]["role"], "tool")
+        self.assertEqual(messages[1]["tool_call_id"], "call_1")
+        self.assertEqual(len(requests), 1)
+        self.assertEqual(str(requests[0].url), "https://openrouter.ai/api/v1/chat/completions")
+        self.assertEqual(requests[0].headers["Authorization"], "Bearer test-openrouter-key")
+        body = json.loads(requests[0].content)
+        self.assertEqual(body["model"], agent.MODEL)
+        self.assertNotIn("response_format", body)
+        self.assertFalse(body["parallel_tool_calls"])
+        self.assertEqual(body["tools"][0]["function"]["name"], "create_video")
 
 
 if __name__ == "__main__":
