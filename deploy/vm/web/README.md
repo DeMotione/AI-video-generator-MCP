@@ -1,4 +1,4 @@
-# Website on the existing Oracle Gemma VM
+# Website on the existing Oracle VM
 
 Keep the code in GitHub and clone it to `/home/ubuntu/aivideo-web` on the VM.
 The existing `/home/ubuntu/mcp-agent` and `/home/ubuntu/ai-video-mcp` services
@@ -55,7 +55,7 @@ journalctl -u aivideo-worker -n 50 --no-pager
 
 Serve the website through an HTTPS reverse proxy on the VM. Point your domain
 to the Oracle VM, allow ports 80/443 in the Oracle network rules and VM
-firewall, and keep ports 8000/8001/8100/11434 on localhost. If Caddy is your
+firewall, and keep ports 8000/8001/8100 on localhost. If Caddy is your
 proxy, `Caddyfile.example` provides the site configuration: replace the
 hostname, copy collected static files to `/var/www/aivideo-static`, and make
 them readable by Caddy. Gunicorn accepts forwarded HTTPS headers from the
@@ -82,7 +82,7 @@ Restore production settings before exposing the site publicly.
 
 The browser uploads to Django and gets a queued job immediately. The worker
 sends `{request_id, prompt, image_base64}` to `POST /jobs`. The agent persists
-the request before running Gemma, saves the upload as an image temp file,
+the request before calling OpenRouter, saves the upload as an image temp file,
 registers it with MCP, and records the MCP video job ID. Django polls
 `GET /jobs/<request_id>`, then downloads `GET /jobs/<request_id>/video` into
 its private storage. Playback and downloads go through Django's existing

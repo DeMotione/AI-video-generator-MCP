@@ -116,6 +116,7 @@ def submit_agent_job(job):
     except AgentError as exc:
         # The response may have been lost after acceptance. Reconcile using
         # the same request ID; never create a replacement request.
+        logger.warning("Agent submission for job %s: %s", job.pk, exc)
         update(job, message=str(exc))
     except Exception:
         logger.exception("Agent submission interrupted for job %s", job.pk)
@@ -140,6 +141,8 @@ def poll_agent_job(job):
     except AgentBusy as exc:
         update(job, status=Generation.Status.QUEUED, message=str(exc))
     except AgentError as exc:
+        if job.message != str(exc):
+            logger.warning("Agent status for job %s: %s", job.pk, exc)
         update(job, message=str(exc))
     except Exception:
         logger.exception("Agent polling failed for job %s", job.pk)

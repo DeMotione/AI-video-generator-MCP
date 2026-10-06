@@ -5,15 +5,15 @@ durable `/jobs` API and retrieves finished videos through authenticated agent
 downloads. Deployment instructions and web/worker systemd units are in
 [web/README.md](web/README.md). `/chat` remains available for existing clients.
 
-The always-on VM (Ubuntu 24.04, ARM64, reachable over Tailscale) runs three
-systemd services. Nothing on it needs a GPU; video generation happens on the
-RunPod endpoint described in [../runpod/README.md](../runpod/README.md).
+The always-on VM (Ubuntu 24.04, ARM64, reachable over Tailscale) runs the MCP
+and agent services. The agent calls OpenRouter for planning. Nothing on the VM
+needs a GPU; video generation happens on the RunPod endpoint described in
+[../runpod/README.md](../runpod/README.md).
 
 | Service | Folder on the VM | Listens on | Role |
 | --- | --- | --- | --- |
-| `ollama` | (system install) | 127.0.0.1:11434 | Gemma 3 12B (`LLM_Gemma3_12B`) |
 | `aivideo-mcp` | `~/ai-video-mcp` | 127.0.0.1:8001 | FastMCP server, this repo's `video_mcp` package |
-| `aivideo-agent` | `~/mcp-agent` | 127.0.0.1:8100 | `/chat` API: Gemma picks MCP tools, then polls the job |
+| `aivideo-agent` | `~/mcp-agent` | 127.0.0.1:8100 | `/chat` and `/jobs` APIs: OpenRouter plans MCP calls |
 
 The files in [mcp/](mcp/) and [agent/](agent/) are the VM copies of each
 service's `pyproject.toml`, `uv.lock`, launcher and unit file. The VM runs
@@ -25,7 +25,7 @@ own `pyproject.toml` targets 3.14.
 ```text
 POST /chat {prompt, image_base64}             (agent, bearer token)
   -> register_image_base64                    (MCP: validate, crop to 16:9, 1280x720 JPEG)
-  -> Gemma chooses create_video(plan)         (MCP: spend checks, then RunPod /run)
+  -> OpenRouter returns create_video(plan)    (MCP: spend checks, then RunPod /run)
   -> agent polls get_video_status every 5 s   (no LLM turns while waiting)
   -> get_video_result                         (data/outputs/<job_id>.mp4 + download URL)
 ```
@@ -52,9 +52,9 @@ AI_VIDEO_DEMO_FILE=/home/ubuntu/ai-video-mcp/data/demo/prepared-demo.mp4
 Optional: `RUNPOD_PRICE_PER_SECOND` and `RUNPOD_EXPECTED_SECONDS` feed
 `estimate_video_cost`; `RUNPOD_POLL_SECONDS` sets the background poll interval.
 
-`~/mcp-agent/.env`: see [agent/.env.example](agent/.env.example). Keep
-`AGENT_REQUEST_TIMEOUT_SECONDS=1800`: Gemma on this CPU takes several minutes
-before it submits, and a RunPod cold start adds a few more.
+For the agent's OpenRouter key, model and VM commands, follow
+[openrouter.md](openrouter.md). Keep `AGENT_REQUEST_TIMEOUT_SECONDS=1800` if
+the `/chat` endpoint waits through a RunPod cold start.
 
 Switch back to the free prepared demo at any time with `VIDEO_BACKEND=demo`
 and `sudo systemctl restart aivideo-mcp`.
@@ -94,6 +94,6 @@ Per-job cost and timing records are in `~/ai-video-mcp/data/runpod/<job_id>.json
 
 ```bash
 curl http://127.0.0.1:8001/healthz          # MCP + RunPod queue/workers (free)
-cd ~/mcp-agent && .venv/bin/python check-agent.py   # agent + Ollama + MCP tools
+cd ~/mcp-agent && .venv/bin/python check-agent.py   # agent + OpenRouter + MCP tools
 journalctl -u aivideo-mcp -n 50 --no-pager
 ```
