@@ -1,0 +1,73 @@
+name: Validate and deploy
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  web:
+    name: Django checks
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4 # v10.1.0
+      - name: Existing web checks and tests
+        run: bash deploy/vm/web/ci.sh
+  mcp-agent:
+    name: MCP and agent checks
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      PYTHON_DOTENV_DISABLED: '1'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4 # v10.1.0
+      - run: uv sync --locked --python 3.14
+      - run: uv run --no-sync ruff check video_mcp
+      - run: uv run --no-sync pytest
+      - run: uv sync --project deploy/vm/agent --locked --python 3.12
+      - run: uv run --no-sync ruff check --config deploy/vm/agent/pyproject.toml deploy/vm/agent/agent.py deploy/vm/agent/check-agent.py
+      - run: deploy/vm/agent/.venv/bin/python -m unittest discover -s deploy/vm/agent -p test_jobs.py
+  deploy:
+    name: Deploy production
+    needs: [web, mcp-agent]
+    if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    environment: production
+    concurrency:
+      group: aivideo-production
+      cancel-in-progress: false
+    steps:
+      - name: Join the deployment tailnet
+        uses: tailscale/github-action@v4
+        with:
+          oauth-client-id: ${{ secrets.TS_OAUTH_CLIENT_ID }}
+          oauth-secret: ${{ secrets.TS_OAUTH_SECRET }}
+          tags: tag:aivideo-ci
+      - name: Deploy the checked commit over verified SSH
+        env:
+          DEPLOY_HOST: ${{ vars.DEPLOY_HOST }}
+          DEPLOY_PORT: ${{ vars.DEPLOY_PORT }}
+          DEPLOY_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+          KNOWN_HOSTS: ${{ secrets.DEPLOY_KNOWN_HOSTS }}
+          COMMIT_SHA: ${{ github.sha }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ $COMMIT_SHA =~ ^[0-9a-f]{40}$ ]]
+          [[ $DEPLOY_HOST =~ ^[a-zA-Z0-9][a-zA-Z0-9.-]*$ ]]
+          DEPLOY_PORT=${DEPLOY_PORT:-22}
+          [[ $DEPLOY_PORT =~ ^[0-9]+$ && $DEPLOY_PORT -ge 1 && $DEPLOY_PORT -le 65535 ]]
+          [[ -n $DEPLOY_KEY && -n $KNOWN_HOSTS ]]
+          umask 077
+          install -d -m 700 ~/.ssh
+          printf '%s\n' "$DEPLOY_KEY" > ~/.ssh/aivideo_deploy
+          printf '%s\n' "$KNOWN_HOSTS" > ~/.ssh/known_hosts
+          trap 'rm -f ~/.ssh/aivideo_deploy' EXIT
+          ssh -i ~/.ssh/aivideo_deploy -p "$DEPLOY_PORT" \
+            -o BatchMode=yes -o StrictHostKeyChecking=yes -o ConnectTimeout=15 \
+            "aivideo-deploy@$DEPLOY_HOST" "deploy $COMMIT_SHA"

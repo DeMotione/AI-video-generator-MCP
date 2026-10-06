@@ -1,3 +1,4 @@
+import json
 import time
 
 from django.conf import settings
@@ -18,6 +19,11 @@ class Command(BaseCommand):
         try:
             while True:
                 close_old_connections()
+                temporary = settings.WORKER_HEARTBEAT.with_suffix(".tmp")
+                temporary.write_text(
+                    json.dumps({"time": time.time(), "release": settings.RELEASE_SHA})
+                )
+                temporary.replace(settings.WORKER_HEARTBEAT)
                 worker_tick()
                 if options["once"]:
                     break

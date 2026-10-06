@@ -18,7 +18,6 @@ from video_mcp.models import (
     VideoResult,
 )
 
-
 PRESET = "ltx25-fast-5s-16x9-v1"
 MAX_IMAGE_BYTES = 10 * 1024 * 1024
 # How far an image's aspect ratio may stray from 16:9 before it is rejected

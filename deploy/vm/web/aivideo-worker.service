@@ -5,16 +5,25 @@ After=network-online.target aivideo-agent.service
 
 [Service]
 Type=simple
-User=ubuntu
-WorkingDirectory=/home/ubuntu/aivideo-web
+User=@APP_USER@
+Group=@APP_USER@
+WorkingDirectory=@DEPLOY_ROOT@/current/AiVideoGenerator/backend
 Environment=PYTHONUNBUFFERED=1
-EnvironmentFile=/home/ubuntu/aivideo-web/.env
-ExecStart=/home/ubuntu/aivideo-web/AiVideoGenerator/.venv/bin/python AiVideoGenerator/backend/manage.py runworker
+EnvironmentFile=@CONFIG_FILE@
+Environment=APP_ENV=production
+Environment=PYTHON_DOTENV_DISABLED=1
+ExecStart=/bin/bash @DEPLOY_ROOT@/current/deploy/vm/web/start-worker.sh
 Restart=on-failure
 RestartSec=5
-UMask=0077
+TimeoutStopSec=40
+UMask=0007
 NoNewPrivileges=true
 PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=@DEPLOY_ROOT@/shared/runtime
+StandardOutput=journal
+StandardError=journal
 
 [Install]
 WantedBy=multi-user.target

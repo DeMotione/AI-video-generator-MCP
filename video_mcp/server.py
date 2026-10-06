@@ -26,7 +26,6 @@ from video_mcp.video import (
     VideoServiceError,
 )
 
-
 mcp = FastMCP("AI Video Generator")
 
 BACKENDS = {"demo": DemoBackend, "comfy": ComfyBackend, "runpod": RunPodBackend}

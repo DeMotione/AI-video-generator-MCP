@@ -118,3 +118,18 @@ dist/
 # Private keys and certificates
 *.key
 *.pem
+
+# Persistent deployment state and cloud credentials
+.runtime/
+data/assets/
+data/jobs/
+data/runpod/
+data/outputs/
+deploy/vm/agent/data/
+wallets/
+*.p12
+*.sso
+*.jks
+*.sqlite3
+*.sqlite3-*
+ltx_api/ltx_api_key.txt

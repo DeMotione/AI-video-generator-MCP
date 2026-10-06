@@ -1,3 +1,8 @@
+> **Public VM deployment:** follow [the production runbook](../deploy/vm/web/DEPLOYMENT.md).
+> It uses fixed VM configuration, persistent storage, release directories,
+> Nginx/HTTPS and automatic deployment after reviewed merges to main.
+> The commands below are for local development.
+
 # AiVideoGenerator
 
 A private Django website for turning an uploaded image and prompt into video
